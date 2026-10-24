@@ -142,15 +142,23 @@ test('Claude vuelve a inicializar después de fallar la conexión inicial', asyn
   } finally { client.close(); }
 });
 
-// App-server falso: responde cada lectura con el id recibido, salvo que se le pida callar.
+// App-server falso: exige completar el handshake antes de aceptar lecturas.
 function fakeCodex(children, { respond = true, reply } = {}) {
   const child = fakeChild();
   child.requests = [];
   child.usedPercent = 28;
+  child.initialized = false;
   readline.createInterface({ input: child.stdin }).on('line', line => {
     const message = JSON.parse(line);
     child.requests.push(message);
-    if (message.method !== 'account/rateLimits/read' || !respond) return;
+    if (message.method === 'initialize') {
+      setImmediate(() => {
+        child.initialized = true;
+        child.stdout.write(`${JSON.stringify({ id: message.id, result: { userAgent: 'usage-monitor-test' } })}\n`);
+      });
+      return;
+    }
+    if (message.method !== 'account/rateLimits/read' || !child.initialized || !respond) return;
     const payload = reply?.(message) ?? { result: { rateLimits: { primary: { usedPercent: child.usedPercent, windowDurationMins: 300 } } } };
     child.stdout.write('{"method":"account/rateLimits/updated","params":{}}\n');
     child.stdout.write(`${JSON.stringify({ id: message.id, ...payload })}\n`);
@@ -162,7 +170,7 @@ function fakeCodex(children, { respond = true, reply } = {}) {
 test('createCodexClient reutiliza un app-server sin shell y pide lecturas ligeras', async () => {
   const children = [];
   let received;
-  const client = createCodexClient({ spawnCliImpl: (name, args, options) => { received = { name, args, options }; return fakeCodex(children); } });
+  const client = createCodexClient({ timeoutMs: 1000, spawnCliImpl: (name, args, options) => { received = { name, args, options }; return fakeCodex(children); } });
   assert.equal((await client.read()).usedPercent, 28);
   children[0].usedPercent = 35;
   assert.equal((await client.read()).usedPercent, 35);
@@ -172,6 +180,7 @@ test('createCodexClient reutiliza un app-server sin shell y pide lecturas ligera
   assert.equal(reads.length, 2);
   assert.ok(reads.every(message => message.params?.excludeResetCreditDetails === true));
   assert.equal(children[0].requests.filter(message => message.method === 'initialize').length, 1);
+  assert.deepEqual(children[0].requests.slice(0, 3).map(message => message.method), ['initialize', 'initialized', 'account/rateLimits/read']);
   client.close();
   assert.equal(children[0].stdin.writableEnded, true);
   assert.equal(children[0].killed, true);

@@ -6,11 +6,11 @@ import {
   isStale,
   normalizeClaudeUsage,
   normalizeCodexUsage,
-  preferClaude,
   projectClaude,
+  projectCodex,
 } from '../src/core/limits.js';
 
-test('normalizeClaudeUsage maps the statusLine rate limits', () => {
+test('normalizeClaudeUsage maps the account rate limits', () => {
   const actual = normalizeClaudeUsage({
     five_hour: { utilization: 27, resets_at: '2026-09-05T20:30:00Z' },
     seven_day: { utilization: 18, resets_at: '2026-09-11T00:00:00Z' },
@@ -46,7 +46,7 @@ test('normalizeCodexUsage returns null instead of inventing 0%', () => {
   assert.equal(normalizeCodexUsage({ rateLimits: {} }), null);
 });
 
-test('isStale marks missing and expired snapshots', () => {
+test('isStale marks missing and expired readings', () => {
   const now = Date.now();
   assert.equal(isStale(0, CLAUDE_STALE_MS, now), true);
   assert.equal(isStale(now - CLAUDE_STALE_MS - 1, CLAUDE_STALE_MS, now), true);
@@ -60,19 +60,6 @@ test('formatReset returns the exact local reset time in 12-hour format', () => {
   assert.equal(formatReset(null), '—');
 });
 
-test('preferClaude ignores an idle session repeating an older, lower percentage', () => {
-  const active = { usedPercent: 66, resetsAt: 5000, fetchedAt: 100 };
-  const idle = { usedPercent: 60, resetsAt: 5000, fetchedAt: 200 };
-  assert.equal(preferClaude(active, idle), active);
-  assert.equal(preferClaude(idle, active), active);
-  const confirmed = { ...active, fetchedAt: 300 };
-  assert.equal(preferClaude(active, confirmed), confirmed);
-  const nextWindow = { usedPercent: 1, resetsAt: 9000, fetchedAt: 50 };
-  assert.equal(preferClaude(active, nextWindow), nextWindow);
-  assert.equal(preferClaude(nextWindow, active), nextWindow);
-  assert.equal(preferClaude(null, idle), idle);
-});
-
 test('projectClaude dims old data and hides an expired window without inventing 0%', () => {
   const now = 1800000000000;
   const value = { usedPercent: 64, resetsAt: now + 60000, fetchedAt: now - CLAUDE_STALE_MS - 1 };
@@ -83,6 +70,14 @@ test('projectClaude dims old data and hides an expired window without inventing 
   assert.deepEqual([reset.value, reset.aged, reset.stale], [null, false, true]);
   assert.equal(projectClaude({ value, fetchedAt: now, error: 'x' }, now).stale, true);
   assert.equal(projectClaude({ value: null }, now).stale, false);
+});
+
+test('projectCodex oculta una ventana vencida hasta recibir otra lectura', () => {
+  const now = 1800000000000;
+  const active = { value: { usedPercent: 12, resetsAt: now + 60000 }, fetchedAt: now };
+  assert.deepEqual([projectCodex(active, now).value.usedPercent, projectCodex(active, now).stale], [12, false]);
+  const expired = projectCodex({ ...active, value: { ...active.value, resetsAt: now } }, now);
+  assert.deepEqual([expired.value, expired.stale], [null, true]);
 });
 
 test('explicit null, blank and boolean percentages are not zero', () => {

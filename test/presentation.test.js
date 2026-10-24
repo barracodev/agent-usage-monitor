@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { meterTone, providerState, formatAge, formatCountdown } from '../src/core/presentation.js';
+import { activeResetAt, meterTone, providerState, formatAge, formatCountdown } from '../src/core/presentation.js';
 
 test('meterTone uses 80 and 100 percent thresholds', () => {
   for (const [value, tone] of [[0, 'good'], [79.9, 'good'], [80, 'warn'], [99.9, 'warn'], [100, 'danger'], [null, 'unknown']]) assert.equal(meterTone(value), tone);
@@ -29,4 +29,12 @@ test('countdown follows reset time, rounds up minutes and never goes negative', 
   assert.equal(formatCountdown(now + 1, now), '0 h 1 m');
   assert.equal(formatCountdown(now - 1, now), '0 h 0 m');
   assert.equal(formatCountdown(null, now), '—');
+});
+
+test('a reset solo existe mientras hay consumo y la ventana sigue activa', () => {
+  const now = 1800000000000;
+  assert.equal(activeResetAt({ value: { usedPercent: 12, resetsAt: now + 60000 } }, now), now + 60000);
+  assert.equal(activeResetAt({ value: { usedPercent: 0, resetsAt: now + 60000 } }, now), null);
+  assert.equal(activeResetAt({ value: { usedPercent: 12, resetsAt: now - 1 } }, now), null);
+  assert.equal(activeResetAt({ value: { usedPercent: 12, resetsAt: null } }, now), null);
 });

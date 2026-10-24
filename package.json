@@ -10,7 +10,7 @@
     "start": "electron .",
     "test": "node --test",
     "test:visual": "electron scripts/visual-check.mjs",
-    "check": "node --check src/main/index.js && node --check src/main/data.js && node --check src/main/statusline.js && node --check src/main/process.js && node --check src/main/preload.cjs && node --check src/core/limits.js && node --check src/core/presentation.js && node --check src/core/statusline.js && node --check src/collector/usage-monitor-statusline-collector.mjs && node --check src/renderer/app.js",
+    "check": "node --check src/main/index.js && node --check src/main/data.js && node --check src/main/process.js && node --check src/main/preload.cjs && node --check src/core/limits.js && node --check src/core/presentation.js && node --check src/renderer/app.js",
     "dist": "npm test && npm run check && electron-builder --win nsis portable"
   },
   "devDependencies": {
@@ -22,7 +22,7 @@
     "productName": "Agent Usage Monitor",
     "asar": true,
     "asarUnpack": ["node_modules/@hicccc77/electron-liquid-glass/**/*"],
-    "files": ["src/**/*", "package.json", "README.md", "LICENSE"],
+    "files": ["src/**/*", "assets/icon.ico", "package.json", "README.md", "LICENSE"],
     "directories": { "output": "dist" },
     "win": {
       "icon": "assets/icon.ico",

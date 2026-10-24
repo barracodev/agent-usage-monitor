@@ -38,21 +38,17 @@ export function isStale(fetchedAt, maxAgeMs, now = Date.now()) {
   return !Number.isFinite(stamp) || stamp <= 0 || now - stamp > maxAgeMs;
 }
 
-// Cada sesión de Claude Code repite el uso de su última respuesta aunque esté inactiva, así que la
-// captura más reciente no es el dato más nuevo: manda la ventana más nueva y, dentro de ella, el
-// mayor uso, porque solo puede subir hasta el reset.
-export function preferClaude(current, candidate) {
-  if (!current || !candidate) return candidate || current;
-  if (candidate.resetsAt !== current.resetsAt) return (candidate.resetsAt ?? 0) > (current.resetsAt ?? 0) ? candidate : current;
-  if (candidate.usedPercent !== current.usedPercent) return candidate.usedPercent > current.usedPercent ? candidate : current;
-  return candidate.fetchedAt >= current.fetchedAt ? candidate : current;
-}
-
 // Un dato viejo se atenúa; tras el reset hace falta otra lectura para conocer la ventana nueva.
 export function projectClaude(entry, now = Date.now()) {
   const value = entry.value;
   if (value?.resetsAt && value.resetsAt <= now) return { ...entry, value: null, stale: true, aged: false };
   return { ...entry, fetchedAt: entry.fetchedAt || null, stale: Boolean(value && entry.error), aged: Boolean(value) && isStale(entry.fetchedAt, CLAUDE_STALE_MS, now) };
+}
+
+export function projectCodex(entry, now = Date.now()) {
+  const value = entry.value;
+  if (value?.resetsAt && value.resetsAt <= now) return { ...entry, value: null, stale: true };
+  return { ...entry, fetchedAt: entry.fetchedAt || null, stale: Boolean(value) && (Boolean(entry.error) || isStale(entry.fetchedAt, CODEX_STALE_MS, now)) };
 }
 
 export function formatReset(resetAt) {
