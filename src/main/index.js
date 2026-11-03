@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { projectClaude, projectCodex } from '../core/limits.js';
+import { MOTION_MS, motionRect } from '../core/motion.js';
 import { createClaudeClient, createCodexClient } from './data.js';
 import { resolveExecutable } from './process.js';
 
@@ -40,12 +41,20 @@ let layoutTarget = null;
 let initialPosition = null;
 let boundsAnimation = 0;
 let boundsMotion = Promise.resolve();
+let activeMotion = null;
+let surfaceBounds = null;
+let surfaceWindowOrigin = null;
+let surfacePixels = null;
+let surfaceScale;
+let hostReady = false;
+let positioningHost = false;
 let glassMorph = 0;
 let glassPanel;
 let glassScale;
 let glassLightText = { claude: false, codex: false, footer: false };
 let glassBandKeys = [];
 let glassCapturePolicy = 'all';
+let glassHidden = false;
 let saveTimer;
 let codexTimer;
 let codexKick;
@@ -95,39 +104,81 @@ function placeBounds(bounds, previous, size, placement) {
     : placement.vertical === 'center' ? bounds.y + (previous.height - size.height) / 2 : bounds.y;
   return { x: Math.round(x), y: Math.round(y), ...size };
 }
-function easeInOutQuint(progress) {
-  return progress < .5 ? 16 * progress ** 5 : 1 - (-2 * progress + 2) ** 5 / 2;
+function getSurfaceBounds() {
+  const host = mainWindow.getBounds();
+  if (!surfaceBounds) return host;
+  return { ...surfaceBounds, x: surfaceBounds.x + host.x - surfaceWindowOrigin.x, y: surfaceBounds.y + host.y - surfaceWindowOrigin.y };
 }
-function animateBounds(from, to, duration, delay = 0, fromMorph = glassMorph, toMorph = glassMorph) {
-  const animation = ++boundsAnimation;
-  if (!duration) {
-    glassMorph = toMorph;
-    mainWindow.setBounds(to);
-    return Promise.resolve();
+function hostBounds(capsule) {
+  // Reserva ambos sentidos antes de mostrar: nunca cambia el origen al abrir, cerrar o invertir.
+  const area = screen.getDisplayMatching(capsule).workArea;
+  const width = Math.max(capsule.width, Math.min(778, area.width));
+  const height = Math.max(capsule.height, Math.min(462, area.height));
+  const x = Math.max(area.x, Math.min(capsule.x - 286, area.x + area.width - width));
+  const y = Math.max(area.y, Math.min(capsule.y - 134, area.y + area.height - height));
+  return { x: Math.min(capsule.x, Math.max(capsule.x + capsule.width - width, x)), y: Math.min(capsule.y, Math.max(capsule.y + capsule.height - height, y)), width, height };
+}
+function surfaceEdges(bounds, origin) {
+  const point = screen.dipToScreenPoint({ x: bounds.x + 28, y: bounds.y + 20 });
+  const end = screen.dipToScreenPoint({ x: bounds.x + bounds.width - 28, y: bounds.y + bounds.height - 36 });
+  const x = point.x - origin.x;
+  const y = point.y - origin.y;
+  return { x, y, right: end.x - origin.x, bottom: end.y - origin.y };
+}
+function cancelMotion() {
+  activeMotion?.resolve();
+  activeMotion = null;
+}
+function describeMotion(from, to, duration) {
+  const host = mainWindow.getContentBounds();
+  const origin = screen.dipToScreenPoint({ x: host.x, y: host.y });
+  const scale = screen.getDisplayMatching(to).scaleFactor;
+  const start = surfacePixels && surfaceScale === scale ? { x: surfacePixels.x, y: surfacePixels.y, right: surfacePixels.x + surfacePixels.width, bottom: surfacePixels.y + surfacePixels.height } : surfaceEdges(from, origin);
+  return { id: boundsAnimation, from: start, to: surfaceEdges(to, origin), scale, duration, radius: panelLayout.expanded ? 22 : 21 };
+}
+function animateBounds(from, to, duration) {
+  cancelMotion();
+  ++boundsAnimation;
+  const host = mainWindow.getContentBounds();
+  const origin = screen.dipToScreenPoint({ x: host.x, y: host.y });
+  const motion = describeMotion(from, to, duration);
+  surfacePixels = motionRect(motion, duration ? 0 : 1);
+  surfaceScale = motion.scale;
+  surfaceBounds = duration ? from : to;
+  surfaceWindowOrigin = host;
+  glassMorph = panelLayout.expanded ? 1 : 0;
+  syncGlassSafely();
+  if (duration) {
+    boundsMotion = new Promise(resolve => { activeMotion = { ...motion, origin, target: to, progress: -1, resolve }; });
+  } else boundsMotion = Promise.resolve();
+  return motion;
+}
+function paintMotion(id, progress, complete) {
+  if (!Number.isInteger(id) || !Number.isFinite(progress) || progress < 0 || progress > 1 || typeof complete !== 'boolean' || (complete && progress !== 1)) throw new Error('Frame inválido');
+  const motion = activeMotion;
+  if (!motion || motion.id !== id || progress < motion.progress) return;
+  const rect = motionRect(motion, progress);
+  surfacePixels = rect;
+  const host = mainWindow.getContentBounds();
+  surfaceBounds = { x: host.x + rect.x / motion.scale - 28, y: host.y + rect.y / motion.scale - 20, width: rect.width / motion.scale + 56, height: rect.height / motion.scale + 56 };
+  surfaceWindowOrigin = host;
+  if (progress !== motion.progress) {
+    try { glassPanel.setBounds({ ...rect, x: motion.origin.x + rect.x, y: motion.origin.y + rect.y }); }
+    catch (error) { console.error('No se pudo actualizar Liquid Glass:', error); }
   }
-  const startedAt = performance.now() + delay;
-  return new Promise(resolve => {
-    const step = () => {
-      if (animation !== boundsAnimation || !mainWindow || mainWindow.isDestroyed()) return resolve();
-      const elapsed = Math.max(0, performance.now() - startedAt);
-      const progress = Math.min(1, elapsed / duration);
-      const eased = easeInOutQuint(progress);
-      const next = {};
-      for (const key of ['x', 'y', 'width', 'height']) next[key] = Math.round(from[key] + (to[key] - from[key]) * eased);
-      glassMorph = fromMorph + (toMorph - fromMorph) * eased;
-      mainWindow.setBounds(next);
-      if (progress < 1) setTimeout(step, Math.min(8, duration - elapsed));
-      else resolve();
-    };
-    setTimeout(step, delay);
-  });
+  motion.progress = progress;
+  if (complete) {
+    surfaceBounds = motion.target;
+    layoutTarget = null;
+    cancelMotion();
+  }
 }
 
 async function readSettings() { try { return JSON.parse(await readFile(settingsPath(), 'utf8')); } catch { return {}; } }
 function writePosition() {
   clearTimeout(saveTimer);
   if (!mainWindow || mainWindow.isDestroyed()) return;
-  const bounds = layoutTarget || mainWindow.getBounds();
+  const bounds = layoutTarget || getSurfaceBounds();
   const target = settingsPath();
   const temporary = `${target}.${process.pid}.tmp`;
   const current = layoutSize();
@@ -148,7 +199,8 @@ function harden(contents) {
   contents.session.setPermissionCheckHandler(() => false);
 }
 function updateGlassContrast(bands) {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
+  // Las bandas ya describen el destino; descarta muestras parciales mientras cambia la superficie.
+  if (!mainWindow || mainWindow.isDestroyed() || activeMotion) return;
   const contrast = { ...glassLightText };
   for (const [id, key] of glassBandKeys.entries()) {
     if (!bands[id]) continue;
@@ -163,12 +215,12 @@ function updateGlassContrast(bands) {
 }
 function syncGlass() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
-  const bounds = mainWindow.getContentBounds();
+  const bounds = getSurfaceBounds();
   const { scaleFactor } = screen.getDisplayMatching(bounds);
-  const origin = screen.dipToScreenPoint({ x: bounds.x + 28, y: bounds.y + 20 });
-  const size = { width: bounds.width, height: bounds.height };
-  // Los márgenes CSS son 28 a cada lado y 20 arriba + 36 abajo.
-  const rect = { ...origin, width: Math.round((size.width - 56) * scaleFactor), height: Math.round((size.height - 56) * scaleFactor) };
+  const edges = surfaceEdges(bounds, { x: 0, y: 0 });
+  const host = mainWindow.getContentBounds();
+  const origin = screen.dipToScreenPoint({ x: host.x, y: host.y });
+  const rect = surfacePixels && surfaceScale === scaleFactor ? { ...surfacePixels, x: origin.x + surfacePixels.x, y: origin.y + surfacePixels.y } : { x: edges.x, y: edges.y, width: edges.right - edges.x, height: edges.bottom - edges.y };
   const effect = {
     cornerRadius: (21 + glassMorph) * scaleFactor,
     blurSigma: (4.5 + 1.5 * glassMorph) * scaleFactor,
@@ -185,35 +237,45 @@ function syncGlass() {
     glassPanel.setBounds(rect);
     glassPanel.setParams(effect);
   }
+  const target = layoutTarget || bounds;
+  const bandRect = { width: Math.round((target.width - 56) * scaleFactor), height: Math.round((target.height - 56) * scaleFactor) };
   if (panelLayout.expanded) {
     if (!panelLayout.providers.length) {
       glassBandKeys = ['footer'];
-      glassPanel.setLumaBands([{ id: 0, x: 0, y: 0, width: rect.width, height: rect.height }]);
+      glassPanel.setLumaBands([{ id: 0, x: 0, y: 0, ...bandRect }]);
       if (mainWindow.isVisible()) glassPanel.show(0);
       return;
     }
-    const footerY = Math.min(rect.height, Math.round(158 * scaleFactor));
+    const footerY = Math.min(bandRect.height, Math.round(158 * scaleFactor));
     const columns = panelLayout.providers.length;
     glassBandKeys = [...panelLayout.providers, 'footer'];
     const providerBands = panelLayout.providers.map((key, id) => {
-      const x = Math.round(id * rect.width / columns);
-      const right = Math.round((id + 1) * rect.width / columns);
+      const x = Math.round(id * bandRect.width / columns);
+      const right = Math.round((id + 1) * bandRect.width / columns);
       return { id, x, y: 0, width: right - x, height: footerY };
     });
-    glassPanel.setLumaBands([...providerBands, { id: providerBands.length, x: 0, y: footerY, width: rect.width, height: rect.height - footerY }]);
+    glassPanel.setLumaBands([...providerBands, { id: providerBands.length, x: 0, y: footerY, width: bandRect.width, height: bandRect.height - footerY }]);
   } else {
     const keys = panelLayout.providers.length ? panelLayout.providers : ['footer'];
     glassBandKeys = keys;
     glassPanel.setLumaBands(keys.map((_key, id) => {
-      const y = Math.round(id * rect.height / keys.length);
-      const bottom = Math.round((id + 1) * rect.height / keys.length);
-      return { id, x: 0, y, width: rect.width, height: bottom - y };
+      const y = Math.round(id * bandRect.height / keys.length);
+      const bottom = Math.round((id + 1) * bandRect.height / keys.length);
+      return { id, x: 0, y, width: bandRect.width, height: bottom - y };
     }));
   }
   if (mainWindow.isVisible()) glassPanel.show(0);
 }
-function syncGlassSafely() {
-  try { syncGlass(); }
+function syncGlassSafely(show = false) {
+  if (positioningHost) return;
+  try {
+    if (activeMotion) {
+      if (show === true && glassHidden) { glassPanel?.show(0); glassHidden = false; }
+      return;
+    }
+    syncGlass();
+    if (mainWindow?.isVisible()) glassHidden = false;
+  }
   catch (error) { console.error('No se pudo actualizar Liquid Glass:', error); }
 }
 async function createWindow() {
@@ -228,7 +290,13 @@ async function createWindow() {
   const area = screen.getDisplayMatching({ ...initialPosition, ...size }).workArea;
   const x = Math.max(area.x, Math.min(initialPosition.x, area.x + area.width - size.width));
   const y = Math.max(area.y, Math.min(initialPosition.y, area.y + area.height - size.height));
-  mainWindow = new BrowserWindow({ ...size, x, y, frame: false, transparent: true, alwaysOnTop: true, skipTaskbar: true, resizable: false, maximizable: false, minimizable: false, fullscreenable: false, show: false, webPreferences: { preload: path.join(dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, webviewTag: false, spellcheck: false } });
+  surfaceBounds = { x, y, ...size };
+  surfacePixels = null;
+  const host = hostBounds(surfaceBounds);
+  mainWindow = new BrowserWindow({ ...host, frame: false, transparent: true, alwaysOnTop: true, skipTaskbar: true, resizable: false, maximizable: false, minimizable: false, fullscreenable: false, show: false, webPreferences: { preload: path.join(dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, webviewTag: false, spellcheck: false } });
+  surfaceWindowOrigin = mainWindow.getBounds();
+  hostReady = true;
+  mainWindow.setIgnoreMouseEvents(true, { forward: true });
   // En Windows, 'floating' (el nivel por omisión) reinserta la ventana tras la barra de tareas al
   // activarse; si una app en pantalla completa le quitó el topmost a la barra, el widget lo pierde.
   mainWindow.setAlwaysOnTop(true, 'screen-saver');
@@ -237,8 +305,8 @@ async function createWindow() {
   syncGlass();
   mainWindow.on('move', syncGlassSafely);
   mainWindow.on('resize', syncGlassSafely);
-  mainWindow.on('show', syncGlassSafely);
-  mainWindow.on('hide', () => glassPanel?.hide(0));
+  mainWindow.on('show', () => syncGlassSafely(true));
+  mainWindow.on('hide', () => { glassPanel?.hide(0); glassHidden = true; });
   mainWindow.on('moved', schedulePositionSave);
   mainWindow.on('close', event => {
     writePosition();
@@ -246,7 +314,7 @@ async function createWindow() {
     event.preventDefault();
     mainWindow.hide();
   });
-  mainWindow.on('closed', () => { glassPanel?.destroy(); glassPanel = null; mainWindow = null; });
+  mainWindow.on('closed', () => { cancelMotion(); glassPanel?.destroy(); glassPanel = null; mainWindow = null; surfaceBounds = null; hostReady = false; });
   mainWindow.webContents.on('did-finish-load', () => { if (!initialPosition) applyLayout({ expanded: false, selectorOpen: false, reduceMotion: true, providers: panelLayout.providers }); mainWindow.webContents.send('monitor:glass', glassLightText); });
   await mainWindow.loadFile(path.join(dirname, '..', 'renderer', 'index.html'));
   mainWindow.show();
@@ -341,44 +409,64 @@ function applyLayout(layout) {
   if (!layout || typeof layout.expanded !== 'boolean' || typeof layout.selectorOpen !== 'boolean' || typeof layout.reduceMotion !== 'boolean') throw new Error('Estado de panel inválido');
   const next = { expanded: layout.expanded, selectorOpen: layout.selectorOpen, providers: normalizeProviderKeys(layout.providers) };
   if (!next.expanded && next.selectorOpen) throw new Error('Estado de selector inválido');
-  const bounds = mainWindow.getBounds();
+  const bounds = getSurfaceBounds();
   const anchor = initialPosition ? { ...bounds, ...initialPosition } : layoutTarget || bounds;
   const size = layoutSize(next);
   const previous = layoutSize(panelLayout);
   const area = screen.getDisplayMatching(initialPosition ? { ...initialPosition, ...size } : bounds).workArea;
   if (!panelLayout.expanded) layoutPlacement = placementFor(anchor, area);
   const unchanged = next.expanded === panelLayout.expanded && next.selectorOpen === panelLayout.selectorOpen && next.providers.join() === panelLayout.providers.join();
-  if (unchanged && !initialPosition) return { placement: layoutPlacement, duration: 0, delay: 0 };
+  if (unchanged && !initialPosition && hostReady && !(activeMotion && layout.reduceMotion)) return { placement: layoutPlacement, duration: 0, delay: 0, motion: activeMotion ? undefined : describeMotion(bounds, bounds, 0) };
   // La primera visibilidad llega de localStorage: cambia el tamaño sin desplazar la cápsula.
   const placed = initialPosition ? { ...initialPosition, ...size } : placeBounds(anchor, previous, size, layoutPlacement);
   placed.x = Math.max(area.x, Math.min(placed.x, area.x + area.width - size.width));
   placed.y = Math.max(area.y, Math.min(placed.y, area.y + area.height - size.height));
   const directionChanged = panelLayout.expanded !== next.expanded;
-  const duration = initialPosition || layout.reduceMotion ? 0 : directionChanged ? (next.expanded ? 240 : 210) : 160;
-  const delay = duration ? 24 : 0;
-  const fromMorph = glassMorph;
-  const toMorph = next.expanded ? 1 : 0;
+  const duration = initialPosition || layout.reduceMotion ? 0 : directionChanged ? MOTION_MS.toggle : MOTION_MS.resize;
   panelLayout = next;
   initialPosition = null;
   layoutTarget = placed;
-  boundsMotion = animateBounds(bounds, placed, duration, delay, fromMorph, toMorph).then(() => { if (layoutTarget === placed) layoutTarget = null; });
-  return { placement: layoutPlacement, duration, delay };
+  if (!hostReady) {
+    mainWindow.setBounds(hostBounds(bounds));
+    surfaceBounds = bounds;
+    surfaceWindowOrigin = mainWindow.getBounds();
+    hostReady = true;
+  }
+  const motion = animateBounds(bounds, placed, duration);
+  if (!duration) layoutTarget = null;
+  return { placement: layoutPlacement, duration, delay: 0, motion };
 }
 handle('monitor:layout', applyLayout);
+ipcMain.on('monitor:frame', (event, id, progress, complete) => {
+  if (!fromWidget(event)) return;
+  try { paintMotion(id, progress, complete); }
+  catch (error) { console.error('Frame de widget rechazado:', error.message); }
+});
+handle('monitor:hit-test', interactive => {
+  if (typeof interactive !== 'boolean') throw new Error('Área de puntero inválida');
+  mainWindow.setIgnoreMouseEvents(!interactive, { forward: true });
+});
 handle('monitor:motion', async () => {
   let motion;
   do { motion = boundsMotion; await motion; } while (motion !== boundsMotion);
 });
 handle('monitor:move', (x, y) => {
   if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error('Posición inválida');
+  cancelMotion();
   ++boundsAnimation;
   initialPosition = null;
   layoutTarget = null;
   glassMorph = panelLayout.expanded ? 1 : 0;
-  mainWindow.setBounds({ x: Math.round(x), y: Math.round(y), ...layoutSize() });
+  const target = { x: Math.round(x), y: Math.round(y), ...layoutSize() };
+  positioningHost = true;
+  try { mainWindow.setBounds(hostBounds(target)); }
+  finally { positioningHost = false; }
+  surfacePixels = null;
+  const motion = animateBounds(target, target, 0);
+  mainWindow.webContents.send('monitor:surface', motion);
   schedulePositionSave();
   if (panelLayout.expanded) {
-    const bounds = mainWindow.getBounds();
+    const bounds = getSurfaceBounds();
     layoutPlacement = placementFor(bounds, screen.getDisplayMatching(bounds).workArea);
   }
 });

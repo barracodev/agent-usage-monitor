@@ -5,12 +5,20 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
+import { MOTION_MS, motionRect } from '../src/core/motion.js';
 const root = path.resolve(import.meta.dirname, '..');
 app.setPath('userData', path.join(root, 'dist', 'qa-profile'));
 app.on('window-all-closed', () => {});
 let fixture;
+const motionHandlers = new Map();
+const fixtureEvent = event => ({ sender: event.sender, senderFrame: { url: 'file:///fixture' } });
+ipcMain.handle('qa:motion', event => motionHandlers.get(event.sender.id)?.['monitor:motion'](fixtureEvent(event)));
+ipcMain.handle('qa:hit-test', (event, value) => motionHandlers.get(event.sender.id)?.['monitor:hit-test'](fixtureEvent(event), value));
+ipcMain.on('qa:frame', (event, ...args) => motionHandlers.get(event.sender.id)?.['monitor:frame'](fixtureEvent(event), ...args));
 ipcMain.handle('qa:read', () => fixture);
 ipcMain.handle('qa:layout', (event, layout) => {
+  const handlers = motionHandlers.get(event.sender.id);
+  if (handlers) return handlers['monitor:layout'](fixtureEvent(event), layout);
   const win = BrowserWindow.fromWebContents(event.sender);
   const count = layout.providers.length;
   const slots = Math.max(1, count);
@@ -70,26 +78,48 @@ async function waitForPanel(win, expanded) {
 
 async function checkWindowTiming() {
   const source = (await readFile(path.join(root, 'src/main/index.js'), 'utf8')).replace(/^import .*;$/gm, '').replaceAll('import.meta.url', '"file:///widget"');
-  const win = new BrowserWindow({ x: 100, y: 80, width: 98, height: 194, frame: false, transparent: true, resizable: false, show: false });
+  let win;
+  const handlers = {};
+  fixture = { limits: {}, providers: [{ key: 'claude', name: 'Claude', installed: true }, { key: 'codex', name: 'Codex', installed: true }] };
   try {
-    const context = vm.createContext({ path, fileURLToPath: () => root, performance, setTimeout,
-      createClaudeClient: () => ({}), createCodexClient: () => ({}),
-      app: { requestSingleInstanceLock: () => false, quit() {} }, ipcMain: { handle() {} }, win,
-      screen: { getDisplayMatching: () => ({ workArea: { x: 0, y: 0, width: 1920, height: 1040 } }) },
+    const context = vm.createContext({ path, fileURLToPath: () => path.join(root, 'src/main/index.js'), performance, setTimeout, clearTimeout, motionRect, MOTION_MS,
+      createClaudeClient: () => ({}), createCodexClient: () => ({}), resolveExecutable: () => 'fixture.exe', nativeTheme, screen,
+      readFile: async () => '{"x":100,"y":80}',
+      app: { requestSingleInstanceLock: () => false, quit() {}, getPath: () => root },
+      ipcMain: { handle: (key, fn) => { handlers[key] = fn; }, on: (key, fn) => { handlers[key] = fn; } },
+      BrowserWindow: class extends BrowserWindow {
+        constructor(options) {
+          super({ ...options, webPreferences: { ...options.webPreferences, backgroundThrottling: false, preload: path.join(root, 'scripts/visual-preload.cjs') } });
+          win = this;
+          motionHandlers.set(win.webContents.id, handlers);
+        }
+      },
+      glass: { isSupported: () => true, setWindowCapturePolicy: () => true, createPanel: () => ({ setBounds() {}, setParams() {}, setLumaBands() {}, show() {}, hide() {}, destroy() {} }) },
     });
     vm.runInContext(source, context);
-    vm.runInContext('mainWindow = win', context);
+    // Se mide entre frames recibidos: el sondeo de clases añade hasta 50 ms ajenos a la animación.
+    const frames = [];
+    const paint = handlers['monitor:frame'];
+    handlers['monitor:frame'] = (event, id, progress, complete) => { frames.push({ at: performance.now(), progress }); return paint(event, id, progress, complete); };
+    await vm.runInContext('createWindow()', context);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    const host = win.getBounds();
     for (const expanded of [true, false]) {
-      const startedAt = performance.now();
-      const motion = vm.runInContext(`applyLayout({ expanded: ${expanded}, selectorOpen: false, reduceMotion: false, providers: ['claude', 'codex'] })`, context);
+      frames.length = 0;
+      await win.webContents.executeJavaScript(`document.querySelector('#toggle').click()`);
+      const duration = MOTION_MS.toggle;
+      await waitForPanel(win, expanded);
       await vm.runInContext('boundsMotion', context);
-      const elapsed = performance.now() - startedAt;
-      assert.ok(elapsed >= motion.duration + motion.delay, 'la ventana debe completar toda la duración declarada');
-      assert.ok(elapsed < motion.duration + motion.delay + 64, `la animación se alargó: ${elapsed} ms`);
-      assert.ok(Math.abs(win.getBounds().width - (expanded ? 384 : 98)) <= 1, JSON.stringify(win.getBounds()));
-      console.log(`ventana ${expanded ? 'abrir' : 'cerrar'}: ${Math.round(elapsed)} ms (declarados ${motion.duration + motion.delay} ms)`);
+      const first = frames[0];
+      const elapsed = frames.at(-1).at - first.at;
+      const expected = duration * (1 - first.progress);
+      assert.equal(frames.at(-1).progress, 1, 'la superficie debe completar toda la duración declarada');
+      assert.ok(Math.abs(elapsed - expected) < 34, `la animación duró ${Math.round(elapsed)} ms; se esperaban ${Math.round(expected)}`);
+      assert.deepEqual(win.getBounds(), host, 'el HWND debe permanecer fijo');
+      assert.equal(vm.runInContext('getSurfaceBounds().width', context), expanded ? 384 : 98);
+      console.log(`rAF ${expanded ? 'abrir' : 'cerrar'}: ${Math.round(elapsed)} ms; HWND fijo`);
     }
-  } finally { win.destroy(); }
+  } finally { if (win) { motionHandlers.delete(win.webContents.id); win.destroy(); } }
 }
 
 async function checkWindowPersistence() {
@@ -100,7 +130,7 @@ async function checkWindowPersistence() {
   mkdirSync(profile, { recursive: true });
   const context = vm.createContext({ path, fileURLToPath, readFile, mkdirSync, writeFileSync, renameSync, rmSync, process, performance, setTimeout, clearTimeout,
     createClaudeClient: () => ({}), createCodexClient: () => ({}), resolveExecutable: () => 'fixture.exe',
-    app: { requestSingleInstanceLock: () => false, quit() {}, getPath: () => profile }, ipcMain: { handle: (channel, listener) => { handlers[channel] = listener; } }, nativeTheme, screen,
+    app: { requestSingleInstanceLock: () => false, quit() {}, getPath: () => profile }, ipcMain: { handle: (channel, listener) => { handlers[channel] = listener; }, on() {} }, nativeTheme, screen, motionRect, MOTION_MS,
     BrowserWindow: class extends BrowserWindow {
       async loadFile() { this.webContents.emit('did-finish-load'); }
     },
@@ -127,7 +157,7 @@ async function checkWindowPersistence() {
       writeFileSync(target, JSON.stringify(expected));
       for (let restart = 0; restart < 3; restart++) {
         await start(providers);
-        const { x, y } = win.getBounds();
+        const { x, y } = vm.runInContext('getSurfaceBounds()', context);
         assert.deepEqual({ x, y }, expected, 'el arranque nativo debe conservar la posición con proveedores ocultos');
         handlers['monitor:move']({ sender: win.webContents, senderFrame: { url: 'file:///fixture' } }, x + 8, y + 8);
         expected = { x: x + 8, y: y + 8 };
@@ -189,7 +219,9 @@ async function checkSettingsFocus(win) {
   win.webContents.send('qa:glass', { claude: false, codex: false, footer: false });
   await win.webContents.executeJavaScript('Promise.resolve()');
   win.webContents.sendInputEvent({ type: 'mouseUp', ...point, button: 'left', clickCount: 1 });
-  assert.equal(await win.webContents.executeJavaScript(`JSON.parse(localStorage.getItem('usage-monitor:providers')).codex`), false, 'el clic debe sobrevivir al refresco entre pointerdown y pointerup');
+  // sendInputEvent no espera a que el renderer procese el mouseUp: se espera la escritura del clic.
+  const stored = await win.webContents.executeJavaScript(`new Promise(resolve => { const read = tries => { const value = localStorage.getItem('usage-monitor:providers'); if (value || !tries) resolve(value && JSON.parse(value).codex); else setTimeout(read, 25, tries - 1); }; read(40); })`);
+  assert.equal(stored, false, 'el clic debe sobrevivir al refresco entre pointerdown y pointerup');
   await win.webContents.executeJavaScript(`document.querySelector('[data-action="toggle-provider"][data-provider="codex"]').click(); document.querySelector('.widget').classList.remove('glass')`);
 }
 async function checkEmptyContrast(win) {
@@ -204,6 +236,8 @@ app.whenReady().then(async () => {
   let win;
   try {
     nativeTheme.themeSource = 'light';
+    // Una corrida interrumpida puede dejar un proveedor oculto en el perfil de QA.
+    await session.defaultSession.clearStorageData({ storages: ['localstorage'] });
     await checkWindowTiming();
     await session.defaultSession.clearStorageData({ storages: ['localstorage'] });
     await checkWindowPersistence();

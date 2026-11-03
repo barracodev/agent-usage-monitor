@@ -5,6 +5,7 @@ import vm from 'node:vm';
 import { formatReset } from '../src/core/limits.js';
 import { activeResetAt, formatAge, formatCountdown, meterTone, providerState } from '../src/core/presentation.js';
 import { createClock, flush } from './helpers/clock.js';
+import { motionRect } from '../src/core/motion.js';
 
 async function settingsHarness() {
   const source = (await readFile(new URL('../src/renderer/app.js', import.meta.url), 'utf8')).replace(/^import .*;$/gm, '');
@@ -12,22 +13,22 @@ async function settingsHarness() {
   const elements = {};
   for (const selector of ['#providers', '.widget', '#toggle', '#footer', '#footer-status', '#settings', '#settings-menu', '#provider-settings', '#empty-state', '#empty-icon']) {
     const classes = new Set();
-    elements[selector] = { dataset: {}, children: [], hidden: true, innerHTML: '', attributes: {}, listeners: {}, classes,
+    elements[selector] = { style: {}, dataset: {}, children: [], hidden: true, innerHTML: '', attributes: {}, listeners: {}, classes,
       classList: { add: name => classes.add(name), remove: name => classes.delete(name), toggle: (name, on) => on ? classes.add(name) : classes.delete(name) },
       setAttribute(name, value) { this.attributes[name] = value; }, addEventListener(name, fn) { this.listeners[name] = fn; }, contains: () => false,
     };
   }
   let finishMotion;
   let motion = Promise.resolve();
-  const context = vm.createContext({ formatReset, activeResetAt, formatAge, formatCountdown, meterTone, providerState,
+  const context = vm.createContext({ formatReset, activeResetAt, formatAge, formatCountdown, meterTone, providerState, motionRect,
     document: { querySelector: selector => elements[selector], addEventListener() {} },
     localStorage: { getItem: () => null },
     window: { matchMedia: () => ({ matches: false }), usageMonitor: {
       read: async () => ({ limits: {}, providers: [{ key: 'claude', name: 'Claude', installed: true }, { key: 'codex', name: 'Codex', installed: true }] }),
       layout: async () => ({ placement: { horizontal: 'right', vertical: 'down' }, duration: 160, delay: 24 }),
-      waitForMotion: () => motion, onUpdate() {}, onGlass() {},
+      waitForMotion: () => motion, onUpdate() {}, onGlass() {}, onSurface() {},
     } },
-    ...clock, setInterval() {}, requestAnimationFrame: fn => clock.setTimeout(fn, 16),
+    ...clock, setInterval() {}, requestAnimationFrame: fn => clock.setTimeout(() => fn(clock.performance.now()), 16), cancelAnimationFrame: clock.clearTimeout,
   });
   vm.runInContext(source, context);
   await flush();
@@ -35,7 +36,7 @@ async function settingsHarness() {
   const initial = call('setExpanded(true)');
   await clock.advance(1000);
   await initial;
-  return { elements, clock, call, holdMotion() { motion = new Promise(resolve => { finishMotion = resolve; }); }, finishMotion: () => finishMotion() };
+  return { elements, clock, call, context, holdMotion() { motion = new Promise(resolve => { finishMotion = resolve; }); }, finishMotion: () => finishMotion() };
 }
 
 for (const close of ['closeSettings()', 'setExpanded(false)']) {
@@ -135,6 +136,32 @@ test('refrescar datos o contraste no reemplaza los controles de ajustes', async 
   assert.match(settings.innerHTML, /aria-label="Mostrar Codex"/);
 });
 
+test('rAF pinta la misma geometría física enviada al cristal y descarta animaciones viejas', async () => {
+  const h = await settingsHarness();
+  const frames = [];
+  const hits = [];
+  h.call('window.usageMonitor.frame = (...args) => frameSink(...args); window.usageMonitor.hitTest = value => hitSink(value)');
+  // Los sinks se instalan en el mismo contexto que el renderer.
+  h.context.frameSink = (...args) => frames.push(args);
+  h.context.hitSink = value => hits.push(value);
+  const motion = { id: 10, from: { x: 50, y: 25, right: 103, bottom: 198 }, to: { x: 50, y: 25, right: 460, bottom: 275 }, scale: 1.25, duration: 340, radius: 22 };
+  h.call(`animateSurface(${JSON.stringify(motion)})`);
+  await h.clock.advance(16);
+  assert.equal(frames.length, 1);
+  const rect = motionRect(motion, frames[0][1]);
+  assert.equal(h.elements['.widget'].style.width, `${rect.width / 1.25}px`);
+  assert.equal(h.elements['.widget'].style.left, '40px');
+  h.call('hitTest({ clientX: 41, clientY: 21 }); hitTest({ clientX: 41, clientY: 21 }); hitTest({ clientX: 1, clientY: 1 })');
+  assert.deepEqual(hits, [true, false]);
+  h.call(`animateSurface(${JSON.stringify({ ...motion, id: 11, from: motion.to, to: motion.from, duration: 0 })})`);
+  const count = frames.length;
+  await h.clock.advance(1000);
+  assert.equal(frames.length, count, 'cancelar no envía frames del movimiento anterior');
+  assert.equal(h.elements['.widget'].style.width, '42.4px');
+  h.call(`animateSurface(${JSON.stringify(motion)})`);
+  assert.equal(h.elements['.widget'].style.width, '42.4px', 'un mensaje atrasado no revive la animación');
+});
+
 test('renderer refresh, minute tick, failure and opt-in use the minimal surface', async () => {
   const source = (await readFile(new URL('../src/renderer/app.js', import.meta.url), 'utf8')).replace(/^import .*;$/gm, '');
   const listeners = {};
@@ -168,10 +195,10 @@ test('renderer refresh, minute tick, failure and opt-in use the minimal surface'
   let push;
   let glass;
   let animationFrame;
-  const context = vm.createContext({ formatReset, activeResetAt, formatAge, formatCountdown, meterTone, providerState,
+  const context = vm.createContext({ formatReset, activeResetAt, formatAge, formatCountdown, meterTone, providerState, motionRect,
     document: { querySelector: selector => ({ '#providers': providers, '#toggle': toggle, '.widget': widget, '#footer': footer, '#footer-status': footerStatus, '#settings': settingsButton, '#settings-menu': settingsMenu, '#provider-settings': providerSettings, '#empty-state': emptyState, '#empty-icon': emptyIcon })[selector] || { addEventListener() {} }, addEventListener: (name, fn) => { settingsListeners[`document:${name}`] = fn; } },
     localStorage: { getItem: key => stored[key] || null, setItem: (key, value) => { stored[key] = value; } },
-    window: { screenX: 100, screenY: 200, matchMedia: () => ({ matches: false }), usageMonitor: { layout: value => { layouts.push(value); return Promise.resolve({ horizontal: 'right', vertical: 'down' }); }, waitForMotion: async () => {}, move: (x, y) => moves.push([x, y]), read: async () => { if (failed) throw Error(); return data; }, openInstall: async key => { installPages.push(key); }, onUpdate: listener => { push = listener; }, onGlass: listener => { glass = listener; } } },
+    window: { screenX: 100, screenY: 200, matchMedia: () => ({ matches: false }), usageMonitor: { layout: value => { layouts.push(value); return Promise.resolve({ horizontal: 'right', vertical: 'down' }); }, waitForMotion: async () => {}, move: (x, y) => moves.push([x, y]), read: async () => { if (failed) throw Error(); return data; }, openInstall: async key => { installPages.push(key); }, onUpdate: listener => { push = listener; }, onGlass: listener => { glass = listener; }, onSurface() {} } },
     setInterval: (fn, ms) => intervals.push({ fn, ms }),
     setTimeout: fn => { fn(); return 1; },
     requestAnimationFrame: fn => { animationFrame = fn; return 1; },
@@ -295,6 +322,8 @@ test('la superficie elimina la X y ofrece un selector de proveedores', async () 
   assert.match(html, /id="empty-state"/);
   assert.match(html, /id="provider-settings"/);
   assert.doesNotMatch(html, /listbox|aria-multiselectable/);
-  assert.match(css, /transition: border-radius[^;]+box-shadow/);
-  assert.match(css, /@keyframes content-in[^}]+blur\(3px\)/s);
+  assert.match(css, /transition: box-shadow/);
+  // Un filtro en el fundido obliga a la GPU a prepararlo en la primera apertura y pierde un frame.
+  assert.match(css, /@keyframes content-in/);
+  assert.doesNotMatch(css, /@keyframes content-(?:in|out)\s*\{[^@]*filter/);
 });
