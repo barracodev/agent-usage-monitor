@@ -8,11 +8,21 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <main class="widget" aria-label="Uso de Claude y Codex">
+  <main class="widget" aria-label="Uso de asistentes de IA">
     <button id="toggle" class="toggle" aria-label="Mostrar detalle de uso" aria-expanded="false" aria-controls="providers footer"></button>
-    <button id="quit" class="quit" aria-label="Cerrar">×</button>
     <section id="providers" aria-live="polite"></section>
-    <footer id="footer" class="footer"></footer>
+    <section id="empty-state" class="empty-state" hidden>
+      <span id="empty-icon" aria-hidden="true"></span>
+      <span><strong>Sin IA visibles</strong><small>Abre ajustes</small></span>
+    </section>
+    <footer id="footer" class="footer">
+      <span id="footer-status"></span>
+      <button id="settings" class="settings" aria-label="Configurar proveedores" aria-expanded="false" aria-controls="settings-menu"></button>
+    </footer>
+    <div id="settings-menu" class="settings-menu" role="group" aria-labelledby="settings-title" hidden>
+      <h2 id="settings-title">Mostrar IA</h2>
+      <div id="provider-settings"></div>
+    </div>
   </main>
   <script type="module" src="app.js"></script>
 </body>

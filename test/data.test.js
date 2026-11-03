@@ -86,6 +86,28 @@ test('Claude rechaza datos ausentes o inválidos y permite recuperar la lectura'
   } finally { client.close(); }
 });
 
+test('Claude consulta cuotas aunque el entorno del usuario bloquee tráfico no esencial', async () => {
+  const key = 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC';
+  const previous = Object.entries(process.env).filter(([name]) => name.toUpperCase() === key);
+  try {
+    for (const name of [key, key.toLowerCase()]) {
+      for (const inherited of Object.keys(process.env)) if (inherited.toUpperCase() === key) delete process.env[inherited];
+      process.env[name] = '1';
+      const children = [];
+      const client = data.createClaudeClient({ spawnCliImpl: (_name, _args, options) => fakeClaude(children, {
+        reply: () => Object.keys(options.env).some(inherited => inherited.toUpperCase() === key) ? { rate_limits_available: false } : undefined,
+      }) });
+      try {
+        assert.equal((await client.read()).usedPercent, 4);
+        assert.equal(process.env[name], '1');
+      } finally { client.close(); }
+    }
+  } finally {
+    for (const inherited of Object.keys(process.env)) if (inherited.toUpperCase() === key) delete process.env[inherited];
+    for (const [name, value] of previous) process.env[name] = value;
+  }
+});
+
 test('Claude descarta el cliente si muere y lo relanza en la siguiente lectura', async () => {
   const children = [];
   const client = data.createClaudeClient({ spawnCliImpl: () => fakeClaude(children, { respond: children.length > 0 }) });
@@ -142,15 +164,23 @@ test('Claude vuelve a inicializar después de fallar la conexión inicial', asyn
   } finally { client.close(); }
 });
 
-// App-server falso: responde cada lectura con el id recibido, salvo que se le pida callar.
+// App-server falso: exige completar el handshake antes de aceptar lecturas.
 function fakeCodex(children, { respond = true, reply } = {}) {
   const child = fakeChild();
   child.requests = [];
   child.usedPercent = 28;
+  child.initialized = false;
   readline.createInterface({ input: child.stdin }).on('line', line => {
     const message = JSON.parse(line);
     child.requests.push(message);
-    if (message.method !== 'account/rateLimits/read' || !respond) return;
+    if (message.method === 'initialize') {
+      setImmediate(() => {
+        child.initialized = true;
+        child.stdout.write(`${JSON.stringify({ id: message.id, result: { userAgent: 'usage-monitor-test' } })}\n`);
+      });
+      return;
+    }
+    if (message.method !== 'account/rateLimits/read' || !child.initialized || !respond) return;
     const payload = reply?.(message) ?? { result: { rateLimits: { primary: { usedPercent: child.usedPercent, windowDurationMins: 300 } } } };
     child.stdout.write('{"method":"account/rateLimits/updated","params":{}}\n');
     child.stdout.write(`${JSON.stringify({ id: message.id, ...payload })}\n`);
@@ -162,7 +192,7 @@ function fakeCodex(children, { respond = true, reply } = {}) {
 test('createCodexClient reutiliza un app-server sin shell y pide lecturas ligeras', async () => {
   const children = [];
   let received;
-  const client = createCodexClient({ spawnCliImpl: (name, args, options) => { received = { name, args, options }; return fakeCodex(children); } });
+  const client = createCodexClient({ timeoutMs: 1000, spawnCliImpl: (name, args, options) => { received = { name, args, options }; return fakeCodex(children); } });
   assert.equal((await client.read()).usedPercent, 28);
   children[0].usedPercent = 35;
   assert.equal((await client.read()).usedPercent, 35);
@@ -172,9 +202,22 @@ test('createCodexClient reutiliza un app-server sin shell y pide lecturas ligera
   assert.equal(reads.length, 2);
   assert.ok(reads.every(message => message.params?.excludeResetCreditDetails === true));
   assert.equal(children[0].requests.filter(message => message.method === 'initialize').length, 1);
+  assert.deepEqual(children[0].requests.slice(0, 3).map(message => message.method), ['initialize', 'initialized', 'account/rateLimits/read']);
   client.close();
   assert.equal(children[0].stdin.writableEnded, true);
   assert.equal(children[0].killed, true);
+});
+
+test('Codex ignora peticiones del servidor e ids sin respuesta aunque coincidan con una lectura', async () => {
+  const children = [];
+  const client = createCodexClient({ spawnCliImpl: () => fakeCodex(children, { reply: message => {
+    for (const frame of [{ id: message.id, method: 'item/commandExecution/requestApproval', params: {} }, { id: message.id }, null, 1]) {
+      children[0].stdout.write(`${JSON.stringify(frame)}\n`);
+    }
+    return null;
+  } }) });
+  try { assert.equal((await client.read()).usedPercent, 28); }
+  finally { client.close(); }
 });
 
 test('createCodexClient rechaza errores de lectura sin relanzar el proceso', async () => {

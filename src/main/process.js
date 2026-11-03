@@ -39,7 +39,15 @@ export function spawnCli(name, args, options = {}) {
   const base = { stdio, windowsHide: true, env };
   if (WINDOWS && /\.(cmd|bat)$/i.test(file)) {
     const comspec = env.ComSpec || env.COMSPEC || 'cmd.exe';
-    return spawn(comspec, ['/d', '/s', '/c', file, ...args], base);
+    const quote = value => {
+      const text = String(value);
+      if (/[\r\n\0]/.test(text)) throw new Error('Argumento inválido para el wrapper de Windows');
+      if (text.includes('%')) throw new Error('El carácter % no está soportado en rutas o argumentos del wrapper de Windows');
+      return `"${text.replaceAll('"', '""')}"`;
+    };
+    // cmd.exe exige comillas exteriores adicionales cuando el ejecutable entre comillas sigue a /c.
+    const command = `"${[file, ...args].map(quote).join(' ')}"`;
+    return spawn(comspec, ['/d', '/v:off', '/s', '/c', command], { ...base, windowsVerbatimArguments: true });
   }
   return spawn(file, args, base);
 }

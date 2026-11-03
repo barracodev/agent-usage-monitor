@@ -22,7 +22,9 @@ export function createClaudeClient(options = {}) {
 
   function start() {
     // El bloqueo de todo tráfico no esencial también impide consultar las cuotas.
-    const child = spawnImpl('claude', ['--print', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--no-session-persistence', '--safe-mode', '--strict-mcp-config'], { stdio: ['pipe', 'pipe', 'ignore'], env: { ...process.env, DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1', DO_NOT_TRACK: '1', DISABLE_AUTOUPDATER: '1' } });
+    const env = { ...process.env, DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1', DO_NOT_TRACK: '1', DISABLE_AUTOUPDATER: '1' };
+    for (const key of Object.keys(env)) if (key.toUpperCase() === 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC') delete env[key];
+    const child = spawnImpl('claude', ['--print', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--no-session-persistence', '--safe-mode', '--strict-mcp-config'], { stdio: ['pipe', 'pipe', 'ignore'], env });
     const current = { child, pending: new Map(), seen: 0 };
     const lines = readline.createInterface({ input: child.stdout });
     current.stop = error => {
@@ -94,6 +96,16 @@ export function createCodexClient(options = {}) {
   let nextId = 1;
   const write = (current, message) => { if (server === current) current.child.stdin.write(`${JSON.stringify(message)}\n`); };
 
+  function request(current, method, params, parse = message => message.result) {
+    return new Promise((resolve, reject) => {
+      if (server !== current) return reject(new Error('Codex app-server cerrado'));
+      const id = nextId++;
+      const timer = setTimeout(() => current.stop(new Error('Codex app-server no respondió')), timeoutMs);
+      current.pending.set(id, { resolve, reject, timer, parse });
+      write(current, { method, id, params });
+    });
+  }
+
   function start() {
     const child = spawnImpl('codex', ['app-server', '--stdio'], { stdio: ['pipe', 'pipe', 'ignore'] });
     const current = { child, pending: new Map(), seen: 0 };
@@ -118,28 +130,30 @@ export function createCodexClient(options = {}) {
       if (current.pending.size && ++current.seen > MAX_RPC_LINES) return current.stop(new Error('Codex app-server respondió de más'));
       let message;
       try { message = JSON.parse(line); } catch { return; }
+      if (!message || typeof message !== 'object' || 'method' in message) return;
+      if (!('result' in message) && !('error' in message)) return;
       const request = current.pending.get(message.id);
       if (!request) return;
       current.pending.delete(message.id);
       current.seen = 0;
       clearTimeout(request.timer);
-      try { request.resolve(codexLimitsFrom(message)); } catch (error) { request.reject(error); }
+      if (message.error) request.reject(new Error(message.error.message || 'Codex app-server falló'));
+      else try { request.resolve(request.parse(message)); } catch (error) { request.reject(error); }
     });
-    write(current, { method: 'initialize', id: nextId++, params: { clientInfo: { name: 'agent-usage-monitor', title: 'Agent Usage Monitor', version: '0.1.0' } } });
-    write(current, { method: 'initialized', params: {} });
+    current.ready = request(current, 'initialize', { clientInfo: { name: 'agent-usage-monitor', title: 'Agent Usage Monitor', version: '0.1.0' } })
+      .then(() => write(current, { method: 'initialized', params: {} }))
+      .catch(error => {
+        current.stop(error);
+        throw error;
+      });
     return current;
   }
 
-  function read() {
-    return new Promise((resolve, reject) => {
-      let current;
-      try { current = server || start(); } catch (error) { return reject(error); }
-      const id = nextId++;
-      const timer = setTimeout(() => current.stop(new Error('Codex app-server no respondió')), timeoutMs);
-      current.pending.set(id, { resolve, reject, timer });
-      // Sin el detalle de créditos cada lectura es una sola petición al backend.
-      write(current, { method: 'account/rateLimits/read', id, params: { excludeResetCreditDetails: true } });
-    });
+  async function read() {
+    const current = server || start();
+    await current.ready;
+    // Sin el detalle de créditos cada lectura es una sola petición al backend.
+    return request(current, 'account/rateLimits/read', { excludeResetCreditDetails: true }, codexLimitsFrom);
   }
 
   return { read, close: () => server?.stop(new Error('Codex app-server cerrado')) };

@@ -1,10 +1,10 @@
 const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('usageMonitor', {
   read: () => ipcRenderer.invoke('qa:read'),
-  connectClaude: () => Promise.reject(new Error('QA never installs')),
-  quit: () => {},
-  expand: expanded => ipcRenderer.invoke('qa:expand', expanded),
+  openInstall: () => Promise.resolve(),
+  layout: layout => ipcRenderer.invoke('qa:layout', layout),
+  waitForMotion: () => Promise.resolve(),
   move: (x, y) => ipcRenderer.invoke('qa:move', x, y),
-  onUpdate: () => {},
-  onGlass: () => {},
+  onUpdate: listener => ipcRenderer.on('qa:update', (_event, data) => listener(data)),
+  onGlass: listener => ipcRenderer.on('qa:glass', (_event, contrast) => listener(contrast)),
 });
