@@ -4,8 +4,9 @@
 * { box-sizing: border-box; }
 html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 body { background: transparent; user-select: none; }
+.widget:not(.surface-ready) { visibility: hidden; }
 button { -webkit-app-region: no-drag; font: inherit; cursor: pointer; }
-.widget { position: absolute; top: 20px; left: 28px; width: 42px; height: 66px; margin: 0; padding: 8px 6px 6px; background: #fff; border: 1px solid #999; border-radius: 21px; box-shadow: 0 4px 14px rgb(0 0 0 / 8%); transition: border-radius 240ms cubic-bezier(.22, 1, .36, 1), box-shadow 240ms cubic-bezier(.22, 1, .36, 1), background-color 240ms ease, border-color 240ms ease; }
+.widget { position: absolute; top: 20px; left: 28px; width: 42px; height: 66px; margin: 0; padding: 8px 6px 6px; background: #fff; border: 1px solid #999; border-radius: 21px; box-shadow: 0 4px 14px rgb(0 0 0 / 8%); transition: box-shadow 240ms cubic-bezier(.22, 1, .36, 1), background-color 240ms ease, border-color 240ms ease; }
 .widget[data-count="0"] { width: 150px; }
 .widget[data-count="2"] { height: 138px; }
 .toggle { position: absolute; z-index: 1; inset: 0; width: 100%; height: 100%; border: 0; padding: 0; border-radius: inherit; background: transparent; touch-action: none; }
@@ -38,7 +39,7 @@ button { -webkit-app-region: no-drag; font: inherit; cursor: pointer; }
 .widget.expanded[data-open-vertical="up"] { top: auto; bottom: 36px; }
 .widget.expanded[data-open-vertical="center"] { top: calc(50% - 8px); bottom: auto; transform: translateY(-50%); }
 .widget.expanded[data-open-vertical="down"] { top: 20px; bottom: auto; }
-.widget.opening, .widget.closing { pointer-events: none; }
+.widget.opening, .widget.closing { overflow: hidden; }
 .widget.opening #providers, .widget.opening .empty-state, .widget.opening .footer { animation: content-in 220ms cubic-bezier(.22, 1, .36, 1) both; }
 .widget.closing #providers, .widget.closing .empty-state, .widget.closing .footer { animation: content-out 150ms ease-in both; }
 .widget.expanded:not(.closing) { box-shadow: 0 12px 34px rgb(0 0 0 / 15%); }
@@ -109,6 +110,6 @@ button { -webkit-app-region: no-drag; font: inherit; cursor: pointer; }
 .glass .settings-menu.light-text { background: rgb(35 35 38 / 96%); color: #fff; border-color: rgb(255 255 255 / 28%); }
 .glass .unknown .figure, .glass .stale .figure, .glass .aged .detail-figure, .glass .aged .detail-label, .glass .aged .detail-countdown, .glass .aged .reset, .glass .stale .detail-figure, .glass .stale .detail-label, .glass .stale .detail-countdown, .glass .stale .reset, .glass .unknown .detail-figure, .glass .unknown .detail-countdown, .glass .footer .outdated { color: var(--glass-muted); }
 .glass .light-text .provider-icon { filter: brightness(0) invert(1); opacity: .9; }
-@keyframes content-in { from { opacity: 0; filter: blur(3px); } to { opacity: 1; filter: blur(0); } }
-@keyframes content-out { from { opacity: 1; filter: blur(0); } to { opacity: 0; filter: blur(2px); } }
+@keyframes content-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes content-out { from { opacity: 1; } to { opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { .widget, .settings-menu { transition-duration: 1ms; } }

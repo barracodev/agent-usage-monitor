@@ -1,5 +1,6 @@
 import { formatReset } from '../core/limits.js';
 import { activeResetAt, formatAge, formatCountdown, meterTone, providerState } from '../core/presentation.js';
+import { motionRect } from '../core/motion.js';
 
 const providers = document.querySelector('#providers');
 const widget = document.querySelector('.widget');
@@ -27,7 +28,48 @@ let glassContrast = null;
 let transition = 0;
 let moveFrame = null;
 let pendingMove = null;
+let surfaceFrame = null;
+let surfaceMotion = 0;
+let surfaceBox = null;
+let interactive = false;
+let lastMouse = null;
+// Compensa aquí la latencia relativa de DirectComposition y Chromium, en milisegundos.
+const GLASS_LEAD_MS = 0;
 const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
+
+function drawSurface(motion, progress) {
+  const rect = motionRect(motion, progress);
+  surfaceBox = { x: rect.x / motion.scale, y: rect.y / motion.scale, width: rect.width / motion.scale, height: rect.height / motion.scale };
+  Object.assign(widget.style, { left: `${surfaceBox.x}px`, top: `${surfaceBox.y}px`, width: `${surfaceBox.width}px`, height: `${surfaceBox.height}px`, right: 'auto', bottom: 'auto', transform: 'none', borderRadius: `${motion.radius}px` });
+  if (lastMouse) hitTest(lastMouse);
+}
+function animateSurface(motion) {
+  if (motion.id <= surfaceMotion) return;
+  surfaceMotion = motion.id;
+  if (surfaceFrame !== null) cancelAnimationFrame(surfaceFrame);
+  surfaceFrame = null;
+  drawSurface(motion, motion.duration ? 0 : 1);
+  if (!motion.duration) return;
+  const startedAt = performance.now();
+  const step = timestamp => {
+    const elapsed = timestamp - startedAt;
+    const progress = Math.min(1, Math.max(0, elapsed / motion.duration));
+    const glassProgress = Math.min(1, Math.max(0, (elapsed + GLASS_LEAD_MS) / motion.duration));
+    drawSurface(motion, progress);
+    const complete = progress === 1 && glassProgress === 1;
+    window.usageMonitor.frame(motion.id, glassProgress, complete);
+    surfaceFrame = complete ? null : requestAnimationFrame(step);
+  };
+  surfaceFrame = requestAnimationFrame(step);
+}
+function hitTest(event) {
+  lastMouse = { clientX: event.clientX, clientY: event.clientY };
+  if (!surfaceBox) return;
+  const inside = Boolean(pointer) || (event.clientX >= surfaceBox.x && event.clientX < surfaceBox.x + surfaceBox.width && event.clientY >= surfaceBox.y && event.clientY < surfaceBox.y + surfaceBox.height);
+  if (inside === interactive) return;
+  interactive = inside;
+  void window.usageMonitor.hitTest(inside);
+}
 
 // Un dato envejecido se sigue mostrando: es el mínimo de su ventana.
 const shown = state => state.key === 'live' || state.key === 'aged';
@@ -78,6 +120,8 @@ function syncLayout() {
       widget.dataset.openHorizontal = placement.horizontal;
       widget.dataset.openVertical = placement.vertical;
     }
+    if (result?.motion) animateSurface(result.motion);
+    widget.classList.add('surface-ready');
     return result;
   });
 }
@@ -180,7 +224,7 @@ toggle.addEventListener('keydown', event => { if (event.key === 'Escape') setExp
 toggle.addEventListener('pointerdown', event => {
   if (event.button !== 0) return;
   dragged = false;
-  pointer = { x: event.screenX, y: event.screenY, windowX: window.screenX, windowY: window.screenY };
+  pointer = { x: event.screenX, y: event.screenY, windowX: window.screenX + (surfaceBox ? surfaceBox.x - 28 : 0), windowY: window.screenY + (surfaceBox ? surfaceBox.y - 20 : 0) };
   toggle.setPointerCapture(event.pointerId);
 });
 toggle.addEventListener('pointermove', event => {
@@ -220,6 +264,8 @@ emptyIcon.innerHTML = iconMarkup('eye-off');
 settingsButton.addEventListener('click', event => { event.stopPropagation(); settingsOpen ? void closeSettings() : void openSettings(); });
 document.addEventListener('pointerdown', event => { if (settingsOpen && !settingsMenu.contains(event.target) && !settingsButton.contains(event.target)) void closeSettings(); });
 document.addEventListener('keydown', event => { if (event.key === 'Escape' && settingsOpen) { event.stopPropagation(); void closeSettings(); } });
+document.addEventListener('mousemove', hitTest);
+document.addEventListener('mouseleave', event => hitTest({ clientX: -1, clientY: -1 }));
 providerSettings.addEventListener('click', async event => {
   const target = event.target.closest?.('[data-action]') || event.target;
   const key = target.dataset.provider;
@@ -234,6 +280,7 @@ providerSettings.addEventListener('click', async event => {
 });
 // El proceso principal empuja cada dato nuevo; la lectura periódica solo recalcula caducidad.
 window.usageMonitor.onUpdate(data => { latest = data; render(); });
+window.usageMonitor.onSurface(animateSurface);
 window.usageMonitor.onGlass(contrast => {
   glassContrast = contrast;
   widget.classList.toggle('glass', true);
