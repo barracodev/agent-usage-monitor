@@ -19,6 +19,7 @@ let visibility;
 try { visibility = JSON.parse(localStorage.getItem(visibilityKey)) || {}; } catch { visibility = {}; }
 let expanded = false;
 let settingsOpen = false;
+let settingsMarkup;
 let settingsTransition = 0;
 let pointer = null;
 let dragged = false;
@@ -82,11 +83,14 @@ function syncLayout() {
 }
 function waitForMotion() { return window.usageMonitor.waitForMotion(); }
 function renderSettings() {
-  providerSettings.innerHTML = providerInfo().map(provider => {
+  const markup = providerInfo().map(provider => {
     if (provider.installed === false) return `<div class="provider-setting" role="group" aria-label="${provider.name}"><span><strong>${provider.name}</strong><small>No instalada</small></span><button class="install" aria-label="Instalar ${provider.name}" data-action="install" data-provider="${provider.key}">Instalar</button></div>`;
     const visible = providerVisible(provider);
     return `<div class="provider-setting" role="group" aria-label="${provider.name}"><span><strong>${provider.name}</strong><small>${provider.installed === null ? 'Detectando…' : 'Instalada'}</small></span><button class="visibility" role="checkbox" aria-checked="${visible}" aria-label="${visible ? 'Ocultar' : 'Mostrar'} ${provider.name}" data-action="toggle-provider" data-provider="${provider.key}">${iconMarkup(visible ? 'eye' : 'eye-off')}</button></div>`;
   }).join('');
+  if (markup === settingsMarkup) return;
+  providerSettings.innerHTML = markup;
+  settingsMarkup = markup;
 }
 
 function render() {
@@ -110,6 +114,7 @@ function render() {
   footerStatus.innerHTML = old ? `⚠ ${oldProvider.name} · ${Number.isFinite(old.fetchedAt) ? formatAge(old.fetchedAt) : 'Sin lectura reciente'}` : stamps.length ? `${iconMarkup('refresh-cw')}<span>${formatReset(Math.min(...stamps))}</span>` : 'Esperando lectura';
   footerStatus.setAttribute('aria-label', stamps.length && !old ? `Actualizado ${formatReset(Math.min(...stamps))}` : footerStatus.textContent || 'Estado de actualización');
   footer.classList.toggle('light-text', glassContrast?.footer === true);
+  emptyState.classList.toggle('light-text', glassContrast?.footer === true);
   settingsMenu.classList.toggle('light-text', glassContrast?.footer === true);
   renderSettings();
   void syncLayout();

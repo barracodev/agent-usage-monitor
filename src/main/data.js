@@ -22,7 +22,9 @@ export function createClaudeClient(options = {}) {
 
   function start() {
     // El bloqueo de todo tráfico no esencial también impide consultar las cuotas.
-    const child = spawnImpl('claude', ['--print', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--no-session-persistence', '--safe-mode', '--strict-mcp-config'], { stdio: ['pipe', 'pipe', 'ignore'], env: { ...process.env, DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1', DO_NOT_TRACK: '1', DISABLE_AUTOUPDATER: '1' } });
+    const env = { ...process.env, DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1', DO_NOT_TRACK: '1', DISABLE_AUTOUPDATER: '1' };
+    for (const key of Object.keys(env)) if (key.toUpperCase() === 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC') delete env[key];
+    const child = spawnImpl('claude', ['--print', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--no-session-persistence', '--safe-mode', '--strict-mcp-config'], { stdio: ['pipe', 'pipe', 'ignore'], env });
     const current = { child, pending: new Map(), seen: 0 };
     const lines = readline.createInterface({ input: child.stdout });
     current.stop = error => {
@@ -128,6 +130,8 @@ export function createCodexClient(options = {}) {
       if (current.pending.size && ++current.seen > MAX_RPC_LINES) return current.stop(new Error('Codex app-server respondió de más'));
       let message;
       try { message = JSON.parse(line); } catch { return; }
+      if (!message || typeof message !== 'object' || 'method' in message) return;
+      if (!('result' in message) && !('error' in message)) return;
       const request = current.pending.get(message.id);
       if (!request) return;
       current.pending.delete(message.id);

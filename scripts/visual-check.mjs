@@ -1,5 +1,7 @@
-import { app, BrowserWindow, ipcMain, nativeTheme, session } from 'electron';
+import { app, BrowserWindow, ipcMain, nativeTheme, screen, session } from 'electron';
+import { mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
@@ -90,6 +92,62 @@ async function checkWindowTiming() {
   } finally { win.destroy(); }
 }
 
+async function checkWindowPersistence() {
+  const source = (await readFile(path.join(root, 'src/main/index.js'), 'utf8')).replace(/^import .*;$/gm, '').replaceAll('import.meta.url', JSON.stringify(new URL('../src/main/index.js', import.meta.url).href));
+  const profile = path.join(app.getPath('userData'), 'window-persistence');
+  const target = path.join(profile, 'window.json');
+  const handlers = {};
+  mkdirSync(profile, { recursive: true });
+  const context = vm.createContext({ path, fileURLToPath, readFile, mkdirSync, writeFileSync, renameSync, rmSync, process, performance, setTimeout, clearTimeout,
+    createClaudeClient: () => ({}), createCodexClient: () => ({}), resolveExecutable: () => 'fixture.exe',
+    app: { requestSingleInstanceLock: () => false, quit() {}, getPath: () => profile }, ipcMain: { handle: (channel, listener) => { handlers[channel] = listener; } }, nativeTheme, screen,
+    BrowserWindow: class extends BrowserWindow {
+      async loadFile() { this.webContents.emit('did-finish-load'); }
+    },
+    glass: { isSupported: () => true, setWindowCapturePolicy: () => true, createPanel: () => ({ setBounds() {}, setParams() {}, setLumaBands() {}, show() {}, hide() {}, destroy() {} }) },
+  });
+  vm.runInContext(source, context);
+  let win;
+  async function start(providers) {
+    await vm.runInContext('createWindow()', context);
+    win = vm.runInContext('mainWindow', context);
+    handlers['monitor:layout']({ sender: win.webContents, senderFrame: { url: 'file:///fixture' } }, { expanded: false, selectorOpen: false, reduceMotion: true, providers });
+    await vm.runInContext('boundsMotion', context);
+  }
+  async function close() {
+    const closed = new Promise(resolve => win.once('closed', resolve));
+    vm.runInContext('quitting = true; mainWindow.close()', context);
+    await closed;
+    win = null;
+  }
+  const area = screen.getPrimaryDisplay().workArea;
+  try {
+    for (const providers of [['claude', 'codex'], ['claude'], ['codex'], []]) {
+      let expected = { x: area.x + Math.floor(area.width * .6 / 8) * 8, y: area.y + Math.floor(area.height * .6 / 8) * 8 };
+      writeFileSync(target, JSON.stringify(expected));
+      for (let restart = 0; restart < 3; restart++) {
+        await start(providers);
+        const { x, y } = win.getBounds();
+        assert.deepEqual({ x, y }, expected, 'el arranque nativo debe conservar la posición con proveedores ocultos');
+        handlers['monitor:move']({ sender: win.webContents, senderFrame: { url: 'file:///fixture' } }, x + 8, y + 8);
+        expected = { x: x + 8, y: y + 8 };
+        if (restart === 0) {
+          await new Promise(resolve => setTimeout(resolve, 450));
+          assert.deepEqual(JSON.parse(await readFile(target, 'utf8')), expected, 'setPosition debe guardar sin moved');
+        }
+        await close();
+        assert.deepEqual(JSON.parse(await readFile(target, 'utf8')), expected, 'close debe completar el reemplazo del archivo');
+        await assert.rejects(readFile(`${target}.${process.pid}.tmp`), { code: 'ENOENT' });
+      }
+    }
+    console.log('posición nativa: 12 reaperturas, guardado y cierre sin temporales OK');
+  } finally {
+    win?.destroy();
+    rmSync(target, { force: true });
+    rmSync(`${target}.${process.pid}.tmp`, { force: true });
+  }
+}
+
 async function checkIcons(win) {
   const result = await win.webContents.executeJavaScript(`(async () => {
     const widget = document.querySelector('.widget');
@@ -116,11 +174,39 @@ async function checkIcons(win) {
   })()`);
   assert.deepEqual(result, ['rgb(41, 41, 46)', 'rgb(255, 255, 255)']);
 }
+async function checkSettingsFocus(win) {
+  const point = await win.webContents.executeJavaScript(`(() => {
+    window.qaButton = document.querySelector('[data-action="toggle-provider"][data-provider="codex"]');
+    window.qaButton.focus();
+    const rect = window.qaButton.getBoundingClientRect();
+    return { x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2) };
+  })()`);
+  win.webContents.send('qa:update', fixture);
+  win.webContents.send('qa:glass', { claude: false, codex: false, footer: true });
+  assert.equal(await win.webContents.executeJavaScript('document.activeElement === window.qaButton && window.qaButton.isConnected'), true, 'el refresco y el contraste deben conservar el foco');
+  win.webContents.sendInputEvent({ type: 'mouseDown', ...point, button: 'left', clickCount: 1 });
+  win.webContents.send('qa:update', fixture);
+  win.webContents.send('qa:glass', { claude: false, codex: false, footer: false });
+  await win.webContents.executeJavaScript('Promise.resolve()');
+  win.webContents.sendInputEvent({ type: 'mouseUp', ...point, button: 'left', clickCount: 1 });
+  assert.equal(await win.webContents.executeJavaScript(`JSON.parse(localStorage.getItem('usage-monitor:providers')).codex`), false, 'el clic debe sobrevivir al refresco entre pointerdown y pointerup');
+  await win.webContents.executeJavaScript(`document.querySelector('[data-action="toggle-provider"][data-provider="codex"]').click(); document.querySelector('.widget').classList.remove('glass')`);
+}
+async function checkEmptyContrast(win) {
+  for (const light of [false, true]) {
+    win.webContents.send('qa:glass', { claude: !light, codex: !light, footer: light });
+    const colors = await win.webContents.executeJavaScript(`['#empty-state strong', '#empty-state small', '#empty-icon'].map(selector => getComputedStyle(document.querySelector(selector)).color)`);
+    assert.deepEqual(colors, light ? ['rgb(255, 255, 255)', 'rgb(221, 221, 221)', 'rgb(255, 255, 255)'] : ['rgb(41, 41, 46)', 'rgb(85, 85, 93)', 'rgb(41, 41, 46)']);
+  }
+  await win.webContents.executeJavaScript(`document.querySelector('.widget').classList.remove('glass')`);
+}
 app.whenReady().then(async () => {
   let win;
   try {
     nativeTheme.themeSource = 'light';
     await checkWindowTiming();
+    await session.defaultSession.clearStorageData({ storages: ['localstorage'] });
+    await checkWindowPersistence();
     await session.defaultSession.clearStorageData({ storages: ['localstorage'] });
     const entry = usedPercent => ({ value: { usedPercent, resetsAt: Date.now() + 600000 }, fetchedAt: Date.now() });
     const cases = [
@@ -183,6 +269,7 @@ app.whenReady().then(async () => {
         const settings = await win.webContents.executeJavaScript(inspect);
         assert.equal(settings.settingsOpen, true);
         assert.deepEqual(settings.settingsRows, ['ClaudeInstalada', 'CodexInstalada']);
+        await checkSettingsFocus(win);
         await checkIcons(win);
         win.webContents.debugger.attach('1.3');
         const { nodes } = await win.webContents.debugger.sendCommand('Accessibility.getFullAXTree');
@@ -203,6 +290,12 @@ app.whenReady().then(async () => {
         const empty = await win.webContents.executeJavaScript(inspect);
         assert.equal(empty.emptyVisible, true);
         assert.match(empty.emptyText, /Sin IA visibles/);
+        await checkEmptyContrast(win);
+        await win.webContents.executeJavaScript("document.querySelector('#toggle').click()");
+        await waitForPanel(win, false);
+        await checkEmptyContrast(win);
+        await win.webContents.executeJavaScript("document.querySelector('#toggle').click()");
+        await waitForPanel(win, true);
         await writeFile(path.join(root, 'artifacts/wireframe/normal-sin-ias.png'), (await capture(win)).toPNG());
         await win.webContents.executeJavaScript("document.querySelector('#settings').click()");
         await new Promise(resolve => setTimeout(resolve, 80));

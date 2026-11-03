@@ -20,6 +20,7 @@ async function layoutHarness(bounds, clock = createClock()) {
     createClaudeClient: () => ({}), createCodexClient: () => ({}),
     app: { requestSingleInstanceLock: () => false, quit() {}, getPath: () => '' },
     process: { pid: 1 }, mkdir: async () => {}, rename: async () => {}, writeFile: async (_target, data) => { saved = JSON.parse(data); },
+    mkdirSync() {}, renameSync() {}, rmSync() {}, writeFileSync: (_target, data) => { saved = JSON.parse(data); },
     ipcMain: { handle: (channel, fn) => { handlers[channel] = fn; } },
     screen: { getDisplayMatching: () => ({ workArea: { x: 0, y: 0, width: 1920, height: 1040 } }) },
     ...clock, widget,
@@ -31,6 +32,151 @@ async function layoutHarness(bounds, clock = createClock()) {
     layout: (expanded, extra = {}) => handlers['monitor:layout'](event, { expanded, selectorOpen: false, reduceMotion: true, providers: ['claude', 'codex'], ...extra }),
   };
 }
+
+async function startupHarness({ saved = { x: 1200, y: 500 }, files = new Map(), displays = [{ x: 0, y: 0, width: 1920, height: 1040 }] } = {}) {
+  const source = (await readFile(new URL('../src/main/index.js', import.meta.url), 'utf8')).replace(/^import .*;$/gm, '').replaceAll('import.meta.url', '"file:///widget"');
+  const clock = createClock();
+  const handlers = {};
+  let widget;
+  let failPanel = false;
+  let scaleFactor = 1;
+  let failRename = false;
+  const rename = (from, to) => { if (failRename) throw new Error('rename failed'); files.set(to, files.get(from)); files.delete(from); };
+  class Widget extends EventEmitter {
+    constructor({ x, y, width, height }) {
+      super(); widget = this; this.bounds = { x, y, width, height }; this.visible = false;
+      this.webContents = Object.assign(new EventEmitter(), { send() {}, setWindowOpenHandler() {}, session: { setPermissionRequestHandler() {}, setPermissionCheckHandler() {} } });
+    }
+    getBounds() { return { ...this.bounds }; }
+    getContentBounds() { return this.getBounds(); }
+    setBounds(bounds) { this.bounds = { ...bounds }; this.emit('resize'); this.emit('move'); }
+    setPosition(x, y) { this.bounds = { ...this.bounds, x, y }; this.emit('move'); }
+    isDestroyed() { return false; }
+    isVisible() { return this.visible; }
+    setAlwaysOnTop() {}
+    async loadFile() { this.webContents.emit('did-finish-load'); }
+    show() { this.visible = true; this.emit('show'); }
+    hide() { this.visible = false; this.emit('hide'); }
+  }
+  const context = vm.createContext({
+    path: { dirname: () => 'profile', join: (...parts) => parts.join('/') }, fileURLToPath: () => '',
+    createClaudeClient: () => ({}), createCodexClient: () => ({}), resolveExecutable: () => 'tool.exe', BrowserWindow: Widget, nativeTheme: {},
+    app: { requestSingleInstanceLock: () => false, quit() {}, getPath: () => 'profile' },
+    process: { pid: 42 }, readFile: async () => files.get('profile/window.json') || JSON.stringify(saved),
+    mkdir: async () => {}, writeFile: async (file, data) => files.set(file, data), rename: async (...args) => rename(...args),
+    mkdirSync() {}, writeFileSync: (file, data) => files.set(file, data), renameSync: rename, rmSync: file => files.delete(file),
+    glass: { isSupported: () => true, setWindowCapturePolicy: () => true, createPanel: () => failPanel ? null : { setBounds() {}, setParams() {}, setLumaBands() {}, show() {}, hide() {}, destroy() {} } },
+    screen: {
+      getPrimaryDisplay: () => ({ workArea: displays[0] }),
+      getDisplayMatching: bounds => {
+        const distance = area => Math.hypot(Math.max(area.x - bounds.x, 0, bounds.x - area.x - area.width), Math.max(area.y - bounds.y, 0, bounds.y - area.y - area.height));
+        return { scaleFactor, workArea: [...displays].sort((a, b) => distance(a) - distance(b))[0] };
+      },
+      dipToScreenPoint: point => point,
+    },
+    ipcMain: { handle: (channel, fn) => { handlers[channel] = fn; } }, console: { error() {} }, ...clock,
+  });
+  vm.runInContext(source, context);
+  const call = expression => vm.runInContext(expression, context);
+  const invoke = (channel, ...args) => handlers[channel]({ sender: widget.webContents, senderFrame: { url: 'file:///widget' } }, ...args);
+  return { context, call, files, clock, start: () => call('createWindow()'), window: () => widget, invoke,
+    layout: providers => invoke('monitor:layout', { expanded: false, selectorOpen: false, reduceMotion: false, providers }),
+    failGlass() { failPanel = true; scaleFactor = 2; }, failSave() { failRename = true; },
+  };
+}
+
+test('el arrastre guarda sin moved y el cierre termina el guardado sin dejar temporales', async () => {
+  const h = await startupHarness();
+  await h.start();
+  h.layout(['claude', 'codex']);
+  h.invoke('monitor:move', 800, 600);
+  await h.clock.advance(450);
+  assert.ok(h.files.has('profile/window.json'), 'el arrastre debe guardar aunque setPosition no emita moved');
+  assert.deepEqual(JSON.parse(h.files.get('profile/window.json')), { x: 800, y: 600 });
+  h.invoke('monitor:move', 900, 700);
+  h.call('quitting = true');
+  h.window().emit('close', { preventDefault() { assert.fail('salir de bandeja debe cerrar'); } });
+  assert.deepEqual(JSON.parse(h.files.get('profile/window.json')), { x: 900, y: 700 });
+  assert.deepEqual([...h.files.keys()], ['profile/window.json']);
+});
+
+test('un fallo al reemplazar ajustes conserva el archivo anterior y limpia el temporal', async () => {
+  const h = await startupHarness();
+  await h.start(); h.layout(['claude']);
+  await h.call('writePosition()');
+  const previous = h.files.get('profile/window.json');
+  h.failSave(); h.invoke('monitor:move', 400, 200);
+  await h.call('writePosition()');
+  assert.equal(h.files.get('profile/window.json'), previous);
+  assert.deepEqual([...h.files.keys()], ['profile/window.json']);
+});
+
+test('todos los proveedores visibles u ocultos conservan coordenadas en cinco arranques', async () => {
+  for (const providers of [['claude', 'codex'], ['claude'], ['codex'], []]) {
+    const positions = [[100, 80], [1200, 500], [1200, 800], [1700, 800]];
+    if (providers.length < 2) positions.push([1700, 910]);
+    for (const [x, y] of positions) {
+      const files = new Map();
+      for (let restart = 0; restart < 5; restart++) {
+        const h = await startupHarness({ saved: { x, y }, files });
+        await h.start();
+        h.layout(providers);
+        await h.clock.advance(500);
+        assert.deepEqual([h.window().bounds.x, h.window().bounds.y], [x, y], `${providers}: arranque ${restart}`);
+        await h.call('writePosition()');
+        assert.deepEqual(JSON.parse(files.get('profile/window.json')), { x, y });
+      }
+    }
+  }
+});
+
+test('restaura en pantallas secundarias y acota a la más cercana cuando falta la original', async () => {
+  const displays = [{ x: 0, y: 0, width: 1920, height: 1040 }, { x: -1280, y: -200, width: 1280, height: 984 }];
+  const h = await startupHarness({ saved: { x: -1100, y: 200 }, displays });
+  await h.start(); h.layout(['claude']); await h.clock.advance(500);
+  assert.deepEqual(h.window().getBounds(), { x: -1100, y: 200, width: 98, height: 122 });
+  const missing = await startupHarness({ saved: { x: 4000, y: 1500 }, displays });
+  await missing.start(); missing.layout([]); await missing.clock.advance(500);
+  assert.deepEqual(missing.window().getBounds(), { x: 1714, y: 918, width: 206, height: 122 });
+  const nearest = await startupHarness({ saved: { x: -2200, y: 200 }, displays });
+  await nearest.start(); nearest.layout([]); await nearest.clock.advance(500);
+  assert.deepEqual(nearest.window().getBounds(), { x: -1280, y: 200, width: 206, height: 122 });
+});
+
+test('el panel nativo falla sin excepciones tras arrancar pero rechaza el arranque si nunca se crea', async () => {
+  const h = await startupHarness();
+  await h.start(); h.layout(['claude']); await h.clock.advance(500);
+  h.failGlass();
+  for (const event of ['move', 'resize', 'show']) assert.doesNotThrow(() => h.window().emit(event));
+  const startup = await startupHarness();
+  startup.failGlass();
+  await assert.rejects(startup.start(), /panel nativo/);
+});
+
+test('tras una animación, abrir y cerrar parten de la posición que Windows haya reubicado', async () => {
+  const clock = createClock(16);
+  const h = await layoutHarness({ x: 1200, y: 800, width: 98, height: 194 }, clock);
+  await h.layout(true, { reduceMotion: false }); await clock.advance(300);
+  const expanded = h.widget.getBounds();
+  h.widget.setBounds({ ...expanded, x: expanded.x - 200, y: expanded.y - 100 });
+  await h.layout(false, { reduceMotion: false }); await clock.advance(300);
+  assert.deepEqual(h.widget.getBounds(), { x: 1000, y: 700, width: 98, height: 194 });
+  h.widget.setPosition(300, 80);
+  await h.layout(true, { reduceMotion: false }); await clock.advance(300);
+  assert.deepEqual(h.widget.getBounds(), { x: 300, y: 80, width: 384, height: 256 });
+});
+
+test('arrastrar durante una animación completa el tamaño del panel en la posición nueva', async () => {
+  const clock = createClock(16);
+  const h = await layoutHarness({ x: 100, y: 80, width: 98, height: 194 }, clock);
+  await h.layout(true, { reduceMotion: false });
+  await clock.advance(128);
+  h.handlers['monitor:move'](h.event, 500, 300);
+  await clock.advance(1000);
+  await h.layout(true);
+  assert.deepEqual(h.widget.getBounds(), { x: 500, y: 300, width: 384, height: 256 });
+  assert.equal(vm.runInContext('glassMorph', h.context), 1);
+});
 
 for (const [x, y] of [[900, 80], [100, 240], [100, 590]]) {
   test(`abrir y cerrar conserva la cápsula y su posición guardada en (${x}, ${y})`, async () => {
@@ -115,6 +261,7 @@ test('widget IPC expands inside the display, collapses and rejects invalid movem
     createClaudeClient: () => ({}), createCodexClient: () => ({}),
     app: { requestSingleInstanceLock: () => false, quit() {}, getPath: () => '' },
     process: { pid: 1 }, mkdir: async () => {}, rename: async () => {}, writeFile: async (_target, data) => { saved = JSON.parse(data); },
+    mkdirSync() {}, renameSync() {}, rmSync() {}, writeFileSync: (_target, data) => { saved = JSON.parse(data); }, clearTimeout() {},
     ipcMain: { handle: (channel, fn) => { handlers[channel] = fn; } }, contents,
     screen: { getDisplayMatching: () => ({ workArea: { x: 0, y: 0, width: 1920, height: 1040 } }) },
     performance: { now: () => now },

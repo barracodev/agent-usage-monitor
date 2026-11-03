@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, screen, shell, Tray } from 'electron';
 import glass from '@hicccc77/electron-liquid-glass';
-import { watch } from 'node:fs';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdirSync, renameSync, rmSync, watch, writeFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -37,6 +37,7 @@ let quitting = false;
 let panelLayout = { expanded: false, selectorOpen: false, providers: ['claude', 'codex'] };
 let layoutPlacement = { horizontal: 'left', vertical: 'down' };
 let layoutTarget = null;
+let initialPosition = null;
 let boundsAnimation = 0;
 let boundsMotion = Promise.resolve();
 let glassMorph = 0;
@@ -123,17 +124,21 @@ function animateBounds(from, to, duration, delay = 0, fromMorph = glassMorph, to
 }
 
 async function readSettings() { try { return JSON.parse(await readFile(settingsPath(), 'utf8')); } catch { return {}; } }
-async function writePosition() {
+function writePosition() {
+  clearTimeout(saveTimer);
   if (!mainWindow || mainWindow.isDestroyed()) return;
   const bounds = layoutTarget || mainWindow.getBounds();
   const target = settingsPath();
   const temporary = `${target}.${process.pid}.tmp`;
   const current = layoutSize();
   const collapsed = layoutSize({ ...panelLayout, expanded: false, selectorOpen: false });
-  const capsule = panelLayout.expanded ? placeBounds(bounds, current, collapsed, layoutPlacement) : bounds;
-  try { await mkdir(path.dirname(target), { recursive: true }); await writeFile(temporary, JSON.stringify({ x: capsule.x, y: capsule.y })); await rename(temporary, target); } catch { /* no impide cerrar */ }
+  const capsule = initialPosition || (panelLayout.expanded ? placeBounds(bounds, current, collapsed, layoutPlacement) : bounds);
+  // El cierre de Electron no espera promesas de escritura.
+  try { mkdirSync(path.dirname(target), { recursive: true }); writeFileSync(temporary, JSON.stringify({ x: capsule.x, y: capsule.y })); renameSync(temporary, target); }
+  catch { /* no impide cerrar */ }
+  finally { try { rmSync(temporary, { force: true }); } catch { /* no impide cerrar */ } }
 }
-function schedulePositionSave() { clearTimeout(saveTimer); saveTimer = setTimeout(() => void writePosition(), 400); }
+function schedulePositionSave() { clearTimeout(saveTimer); saveTimer = setTimeout(writePosition, 400); }
 function harden(contents) {
   contents.setWindowOpenHandler(() => ({ action: 'deny' }));
   contents.on('will-navigate', event => event.preventDefault());
@@ -207,6 +212,10 @@ function syncGlass() {
   }
   if (mainWindow.isVisible()) glassPanel.show(0);
 }
+function syncGlassSafely() {
+  try { syncGlass(); }
+  catch (error) { console.error('No se pudo actualizar Liquid Glass:', error); }
+}
 async function createWindow() {
   if (!glass.isSupported()) throw new Error('Liquid Glass requiere Windows 10 2004 o posterior y su módulo nativo para Windows x64.');
   const saved = await readSettings();
@@ -214,28 +223,31 @@ async function createWindow() {
   panelLayout = { expanded: false, selectorOpen: false, providers: installed };
   const size = layoutSize();
   nativeTheme.themeSource = 'light';
-  const area = screen.getPrimaryDisplay().workArea;
-  const x = Math.min(Math.max(Number.isFinite(saved.x) ? saved.x : area.x + area.width - size.width - 24, area.x), area.x + area.width - size.width);
-  const y = Math.min(Math.max(Number.isFinite(saved.y) ? saved.y : area.y + 80, area.y), area.y + area.height - size.height);
+  const primary = screen.getPrimaryDisplay().workArea;
+  initialPosition = { x: Number.isFinite(saved.x) ? Math.round(saved.x) : primary.x + primary.width - size.width - 24, y: Number.isFinite(saved.y) ? Math.round(saved.y) : primary.y + 80 };
+  const area = screen.getDisplayMatching({ ...initialPosition, ...size }).workArea;
+  const x = Math.max(area.x, Math.min(initialPosition.x, area.x + area.width - size.width));
+  const y = Math.max(area.y, Math.min(initialPosition.y, area.y + area.height - size.height));
   mainWindow = new BrowserWindow({ ...size, x, y, frame: false, transparent: true, alwaysOnTop: true, skipTaskbar: true, resizable: false, maximizable: false, minimizable: false, fullscreenable: false, show: false, webPreferences: { preload: path.join(dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, webviewTag: false, spellcheck: false } });
   // En Windows, 'floating' (el nivel por omisión) reinserta la ventana tras la barra de tareas al
   // activarse; si una app en pantalla completa le quitó el topmost a la barra, el widget lo pierde.
   mainWindow.setAlwaysOnTop(true, 'screen-saver');
   glassCapturePolicy = glass.setWindowCapturePolicy(mainWindow, 'dda-only') ? 'dda-only' : 'all';
   harden(mainWindow.webContents);
-  mainWindow.on('move', syncGlass);
-  mainWindow.on('resize', syncGlass);
-  mainWindow.on('show', syncGlass);
+  syncGlass();
+  mainWindow.on('move', syncGlassSafely);
+  mainWindow.on('resize', syncGlassSafely);
+  mainWindow.on('show', syncGlassSafely);
   mainWindow.on('hide', () => glassPanel?.hide(0));
   mainWindow.on('moved', schedulePositionSave);
   mainWindow.on('close', event => {
-    void writePosition();
+    writePosition();
     if (quitting) return;
     event.preventDefault();
     mainWindow.hide();
   });
   mainWindow.on('closed', () => { glassPanel?.destroy(); glassPanel = null; mainWindow = null; });
-  mainWindow.webContents.on('did-finish-load', () => { applyLayout({ expanded: false, selectorOpen: false, reduceMotion: true, providers: panelLayout.providers }); mainWindow.webContents.send('monitor:glass', glassLightText); });
+  mainWindow.webContents.on('did-finish-load', () => { if (!initialPosition) applyLayout({ expanded: false, selectorOpen: false, reduceMotion: true, providers: panelLayout.providers }); mainWindow.webContents.send('monitor:glass', glassLightText); });
   await mainWindow.loadFile(path.join(dirname, '..', 'renderer', 'index.html'));
   mainWindow.show();
 }
@@ -330,24 +342,26 @@ function applyLayout(layout) {
   const next = { expanded: layout.expanded, selectorOpen: layout.selectorOpen, providers: normalizeProviderKeys(layout.providers) };
   if (!next.expanded && next.selectorOpen) throw new Error('Estado de selector inválido');
   const bounds = mainWindow.getBounds();
-  const anchor = layoutTarget || bounds;
+  const anchor = initialPosition ? { ...bounds, ...initialPosition } : layoutTarget || bounds;
   const size = layoutSize(next);
   const previous = layoutSize(panelLayout);
-  const area = screen.getDisplayMatching(bounds).workArea;
+  const area = screen.getDisplayMatching(initialPosition ? { ...initialPosition, ...size } : bounds).workArea;
   if (!panelLayout.expanded) layoutPlacement = placementFor(anchor, area);
   const unchanged = next.expanded === panelLayout.expanded && next.selectorOpen === panelLayout.selectorOpen && next.providers.join() === panelLayout.providers.join();
-  if (unchanged) return { placement: layoutPlacement, duration: 0, delay: 0 };
-  const placed = placeBounds(anchor, previous, size, layoutPlacement);
+  if (unchanged && !initialPosition) return { placement: layoutPlacement, duration: 0, delay: 0 };
+  // La primera visibilidad llega de localStorage: cambia el tamaño sin desplazar la cápsula.
+  const placed = initialPosition ? { ...initialPosition, ...size } : placeBounds(anchor, previous, size, layoutPlacement);
   placed.x = Math.max(area.x, Math.min(placed.x, area.x + area.width - size.width));
   placed.y = Math.max(area.y, Math.min(placed.y, area.y + area.height - size.height));
   const directionChanged = panelLayout.expanded !== next.expanded;
-  const duration = layout.reduceMotion ? 0 : directionChanged ? (next.expanded ? 240 : 210) : 160;
+  const duration = initialPosition || layout.reduceMotion ? 0 : directionChanged ? (next.expanded ? 240 : 210) : 160;
   const delay = duration ? 24 : 0;
   const fromMorph = glassMorph;
   const toMorph = next.expanded ? 1 : 0;
   panelLayout = next;
+  initialPosition = null;
   layoutTarget = placed;
-  boundsMotion = animateBounds(bounds, placed, duration, delay, fromMorph, toMorph);
+  boundsMotion = animateBounds(bounds, placed, duration, delay, fromMorph, toMorph).then(() => { if (layoutTarget === placed) layoutTarget = null; });
   return { placement: layoutPlacement, duration, delay };
 }
 handle('monitor:layout', applyLayout);
@@ -357,8 +371,12 @@ handle('monitor:motion', async () => {
 });
 handle('monitor:move', (x, y) => {
   if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error('Posición inválida');
-  mainWindow.setPosition(Math.round(x), Math.round(y));
+  ++boundsAnimation;
+  initialPosition = null;
   layoutTarget = null;
+  glassMorph = panelLayout.expanded ? 1 : 0;
+  mainWindow.setBounds({ x: Math.round(x), y: Math.round(y), ...layoutSize() });
+  schedulePositionSave();
   if (panelLayout.expanded) {
     const bounds = mainWindow.getBounds();
     layoutPlacement = placementFor(bounds, screen.getDisplayMatching(bounds).workArea);

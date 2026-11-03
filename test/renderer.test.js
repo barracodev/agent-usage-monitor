@@ -109,6 +109,32 @@ test('el renderer conserva opening hasta que la ventana termina', async () => {
   assert.equal(h.elements['.widget'].classes.has('opening'), false);
 });
 
+test('el estado vacío usa el contraste del pie tanto plegado como desplegado', async () => {
+  const h = await settingsHarness();
+  for (const expanded of [false, true]) {
+    for (const light of [false, true]) {
+      h.call(`expanded = ${expanded}; visibility = { claude: false, codex: false }; glassContrast = { claude: ${!light}, codex: ${!light}, footer: ${light} }; render()`);
+      assert.equal(h.elements['#empty-state'].hidden, false);
+      assert.equal(h.elements['#empty-state'].classes.has('light-text'), light);
+    }
+  }
+});
+
+test('refrescar datos o contraste no reemplaza los controles de ajustes', async () => {
+  const h = await settingsHarness();
+  await h.call('openSettings()');
+  const settings = h.elements['#provider-settings'];
+  let replacements = 0;
+  let markup = settings.innerHTML;
+  Object.defineProperty(settings, 'innerHTML', { get: () => markup, set(value) { replacements++; markup = value; } });
+  await h.call('refresh()');
+  h.call('render(); glassContrast = { footer: true }; render()');
+  assert.equal(replacements, 0, 'los mismos botones deben conservar sus nodos entre pointerdown y pointerup');
+  h.call('visibility.codex = false; render()');
+  assert.equal(replacements, 1, 'cambiar visibilidad sí debe actualizar los controles');
+  assert.match(settings.innerHTML, /aria-label="Mostrar Codex"/);
+});
+
 test('renderer refresh, minute tick, failure and opt-in use the minimal surface', async () => {
   const source = (await readFile(new URL('../src/renderer/app.js', import.meta.url), 'utf8')).replace(/^import .*;$/gm, '');
   const listeners = {};
@@ -130,7 +156,7 @@ test('renderer refresh, minute tick, failure and opt-in use the minimal surface'
   const menuClasses = new Set();
   const settingsMenu = { hidden: true, contains: () => false, classList: { toggle: (name, enabled) => enabled ? menuClasses.add(name) : menuClasses.delete(name), add: name => menuClasses.add(name), remove: name => menuClasses.delete(name) } };
   const providerSettings = { innerHTML: '', addEventListener: (name, fn) => { settingsListeners[`list:${name}`] = fn; } };
-  const emptyState = { hidden: true };
+  const emptyState = { hidden: true, classList: { toggle() {} } };
   const emptyIcon = { innerHTML: '' };
   const layouts = [];
   const lastLayout = () => JSON.parse(JSON.stringify(layouts.at(-1)));

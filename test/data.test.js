@@ -86,6 +86,28 @@ test('Claude rechaza datos ausentes o inválidos y permite recuperar la lectura'
   } finally { client.close(); }
 });
 
+test('Claude consulta cuotas aunque el entorno del usuario bloquee tráfico no esencial', async () => {
+  const key = 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC';
+  const previous = Object.entries(process.env).filter(([name]) => name.toUpperCase() === key);
+  try {
+    for (const name of [key, key.toLowerCase()]) {
+      for (const inherited of Object.keys(process.env)) if (inherited.toUpperCase() === key) delete process.env[inherited];
+      process.env[name] = '1';
+      const children = [];
+      const client = data.createClaudeClient({ spawnCliImpl: (_name, _args, options) => fakeClaude(children, {
+        reply: () => Object.keys(options.env).some(inherited => inherited.toUpperCase() === key) ? { rate_limits_available: false } : undefined,
+      }) });
+      try {
+        assert.equal((await client.read()).usedPercent, 4);
+        assert.equal(process.env[name], '1');
+      } finally { client.close(); }
+    }
+  } finally {
+    for (const inherited of Object.keys(process.env)) if (inherited.toUpperCase() === key) delete process.env[inherited];
+    for (const [name, value] of previous) process.env[name] = value;
+  }
+});
+
 test('Claude descarta el cliente si muere y lo relanza en la siguiente lectura', async () => {
   const children = [];
   const client = data.createClaudeClient({ spawnCliImpl: () => fakeClaude(children, { respond: children.length > 0 }) });
@@ -184,6 +206,18 @@ test('createCodexClient reutiliza un app-server sin shell y pide lecturas ligera
   client.close();
   assert.equal(children[0].stdin.writableEnded, true);
   assert.equal(children[0].killed, true);
+});
+
+test('Codex ignora peticiones del servidor e ids sin respuesta aunque coincidan con una lectura', async () => {
+  const children = [];
+  const client = createCodexClient({ spawnCliImpl: () => fakeCodex(children, { reply: message => {
+    for (const frame of [{ id: message.id, method: 'item/commandExecution/requestApproval', params: {} }, { id: message.id }, null, 1]) {
+      children[0].stdout.write(`${JSON.stringify(frame)}\n`);
+    }
+    return null;
+  } }) });
+  try { assert.equal((await client.read()).usedPercent, 28); }
+  finally { client.close(); }
 });
 
 test('createCodexClient rechaza errores de lectura sin relanzar el proceso', async () => {

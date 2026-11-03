@@ -12,11 +12,11 @@ button { -webkit-app-region: no-drag; font: inherit; cursor: pointer; }
 .toggle:focus-visible { outline: 2px solid #999; outline-offset: 3px; }
 #providers { display: flex; flex-direction: column; gap: 22px; height: 100%; }
 #providers[hidden], .empty-state[hidden] { display: none; }
-.empty-state { position: relative; z-index: 2; display: flex; height: 100%; align-items: center; gap: 9px; padding: 0 5px; color: #555; pointer-events: none; }
-.empty-state > span:first-child { display: grid; width: 26px; height: 26px; flex: 0 0 26px; place-items: center; border: 1px solid #ccc; border-radius: 50%; }
+.empty-state { position: relative; z-index: 2; display: flex; height: 100%; align-items: center; gap: 9px; padding: 0 5px; color: var(--glass-ink, #555); pointer-events: none; }
+.empty-state > span:first-child { display: grid; width: 26px; height: 26px; flex: 0 0 26px; place-items: center; border: 1px solid var(--glass-line, #ccc); border-radius: 50%; }
 .empty-state > span:last-child { display: grid; min-width: 0; }
 .empty-state strong { font-size: 11px; line-height: 14px; white-space: nowrap; }
-.empty-state small { color: #777; font-size: 8px; line-height: 11px; white-space: nowrap; }
+.empty-state small { color: var(--glass-muted, #777); font-size: 8px; line-height: 11px; white-space: nowrap; }
 #providers[data-count="1"] { justify-content: center; }
 #providers[data-count="1"] .provider { flex: 0 0 48px; }
 .provider { position: relative; display: flex; flex-direction: column; align-items: center; flex: 1 1 0; min-height: 0; gap: 4px; }
