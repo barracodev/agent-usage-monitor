@@ -11,17 +11,19 @@ async function settingsHarness() {
   const source = (await readFile(new URL('../src/renderer/app.js', import.meta.url), 'utf8')).replace(/^import .*;$/gm, '');
   const clock = createClock();
   const elements = {};
-  for (const selector of ['#providers', '.widget', '#toggle', '#footer', '#footer-status', '#settings', '#settings-menu', '#provider-settings', '#empty-state', '#empty-icon']) {
+  for (const selector of ['#providers', '.widget', '#toggle', '#window-switch', '#session', '#weekly', '#footer', '#footer-status', '#settings', '#settings-menu', '#provider-settings', '#empty-state', '#empty-icon']) {
     const classes = new Set();
     elements[selector] = { style: {}, dataset: {}, children: [], hidden: true, innerHTML: '', attributes: {}, listeners: {}, classes,
       classList: { add: name => classes.add(name), remove: name => classes.delete(name), toggle: (name, on) => on ? classes.add(name) : classes.delete(name) },
       setAttribute(name, value) { this.attributes[name] = value; }, addEventListener(name, fn) { this.listeners[name] = fn; }, contains: () => false,
     };
   }
+  elements['#session'].dataset.window = 'session';
+  elements['#weekly'].dataset.window = 'weekly';
   let finishMotion;
   let motion = Promise.resolve();
   const context = vm.createContext({ formatReset, activeResetAt, formatAge, formatCountdown, meterTone, providerState, motionRect,
-    document: { querySelector: selector => elements[selector], addEventListener() {} },
+    document: { querySelector: selector => elements[selector], querySelectorAll: () => [elements['#session'], elements['#weekly']], addEventListener() {} },
     localStorage: { getItem: () => null },
     window: { matchMedia: () => ({ matches: false }), usageMonitor: {
       read: async () => ({ limits: {}, providers: [{ key: 'claude', name: 'Claude', installed: true }, { key: 'codex', name: 'Codex', installed: true }] }),
@@ -38,6 +40,40 @@ async function settingsHarness() {
   await initial;
   return { elements, clock, call, context, holdMotion() { motion = new Promise(resolve => { finishMotion = resolve; }); }, finishMotion: () => finishMotion() };
 }
+
+test('el switch cambia todos los proveedores y la cápsula conserva sesión al cerrar y reabrir', async () => {
+  const h = await settingsHarness();
+  h.call(`latest.limits = {
+    claude: { session: { value: { usedPercent: 12 } }, weekly: { value: { usedPercent: 32, resetsAt: Date.now() + 51 * 3600000 } } },
+    codex: { session: { value: { usedPercent: 27 } }, weekly: { value: null } }
+  }; render()`);
+  assert.equal(h.elements['#session'].attributes['aria-pressed'], 'true');
+  assert.match(h.elements['#providers'].innerHTML, /12<span>%/);
+  const weekly = h.elements['#weekly'];
+  weekly.listeners.click({ stopPropagation() {} });
+  assert.equal(h.call('expanded'), true);
+  assert.equal(h.call('pointer'), null);
+  assert.equal(weekly.attributes['aria-pressed'], 'true');
+  assert.equal(h.elements['#session'].attributes['aria-pressed'], 'false');
+  assert.match(h.elements['#providers'].innerHTML, /32<span>%/);
+  assert.match(h.elements['#providers'].innerHTML, /2 d 3 h/);
+  assert.match(h.elements['#providers'].innerHTML, /Sin datos/);
+  assert.doesNotMatch(h.elements['#providers'].innerHTML, /0<span>%|27<span>%/);
+  h.call('glassContrast = { window: true, footer: false }; render()');
+  assert.equal(h.elements['#window-switch'].classes.has('light-text'), true);
+  assert.equal(h.elements['#footer'].classes.has('light-text'), false);
+  const closing = h.call('setExpanded(false)');
+  await h.clock.advance(1000);
+  await closing;
+  assert.equal(h.elements['#window-switch'].hidden, true);
+  assert.match(h.elements['#providers'].innerHTML, /12<span>%/);
+  assert.match(h.elements['#providers'].innerHTML, /27<span>%/);
+  await h.call('setExpanded(true)');
+  assert.match(h.elements['#providers'].innerHTML, /32<span>%/);
+  assert.equal(h.elements['#window-switch'].hidden, false);
+  const restarted = await settingsHarness();
+  assert.equal(restarted.elements['#session'].attributes['aria-pressed'], 'true');
+});
 
 for (const close of ['closeSettings()', 'setExpanded(false)']) {
   test(`cancelar una apertura con ${close} mantiene el menú oculto`, async () => {
@@ -188,7 +224,7 @@ test('renderer refresh, minute tick, failure and opt-in use the minimal surface'
   const layouts = [];
   const lastLayout = () => JSON.parse(JSON.stringify(layouts.at(-1)));
   const moves = [];
-  let data = { limits: { claude: { value: { usedPercent: 80, resetsAt: Date.now() + 600000 }, fetchedAt: Date.now() }, codex: { value: { usedPercent: 100, resetsAt: Date.now() + 600000 }, fetchedAt: Date.now() } }, providers: [{ key: 'claude', name: 'Claude', installed: true }, { key: 'codex', name: 'Codex', installed: true }] };
+  let data = { limits: { claude: { session: { value: { usedPercent: 80, resetsAt: Date.now() + 600000 }, fetchedAt: Date.now() } }, codex: { session: { value: { usedPercent: 100, resetsAt: Date.now() + 600000 }, fetchedAt: Date.now() } } }, providers: [{ key: 'claude', name: 'Claude', installed: true }, { key: 'codex', name: 'Codex', installed: true }] };
   let failed = false;
   const installPages = [];
   const stored = {};
@@ -196,7 +232,7 @@ test('renderer refresh, minute tick, failure and opt-in use the minimal surface'
   let glass;
   let animationFrame;
   const context = vm.createContext({ formatReset, activeResetAt, formatAge, formatCountdown, meterTone, providerState, motionRect,
-    document: { querySelector: selector => ({ '#providers': providers, '#toggle': toggle, '.widget': widget, '#footer': footer, '#footer-status': footerStatus, '#settings': settingsButton, '#settings-menu': settingsMenu, '#provider-settings': providerSettings, '#empty-state': emptyState, '#empty-icon': emptyIcon })[selector] || { addEventListener() {} }, addEventListener: (name, fn) => { settingsListeners[`document:${name}`] = fn; } },
+    document: { querySelector: selector => ({ '#providers': providers, '#toggle': toggle, '#window-switch': { classList: { toggle() {} } }, '.widget': widget, '#footer': footer, '#footer-status': footerStatus, '#settings': settingsButton, '#settings-menu': settingsMenu, '#provider-settings': providerSettings, '#empty-state': emptyState, '#empty-icon': emptyIcon })[selector] || { addEventListener() {} }, querySelectorAll: () => [], addEventListener: (name, fn) => { settingsListeners[`document:${name}`] = fn; } },
     localStorage: { getItem: key => stored[key] || null, setItem: (key, value) => { stored[key] = value; } },
     window: { screenX: 100, screenY: 200, matchMedia: () => ({ matches: false }), usageMonitor: { layout: value => { layouts.push(value); return Promise.resolve({ horizontal: 'right', vertical: 'down' }); }, waitForMotion: async () => {}, move: (x, y) => moves.push([x, y]), read: async () => { if (failed) throw Error(); return data; }, openInstall: async key => { installPages.push(key); }, onUpdate: listener => { push = listener; }, onGlass: listener => { glass = listener; }, onSurface() {} } },
     setInterval: (fn, ms) => intervals.push({ fn, ms }),
@@ -279,7 +315,7 @@ test('renderer refresh, minute tick, failure and opt-in use the minimal surface'
   assert.equal(settingsMenu.hidden, true);
   assert.equal(classes.has('selector-open'), false);
   assert.deepEqual(lastLayout(), { expanded: true, selectorOpen: false, reduceMotion: false, providers: ['claude', 'codex'] });
-  data.limits.claude.value.resetsAt = Date.now() - 1;
+  data.limits.claude.session.value.resetsAt = Date.now() - 1;
   intervals.find(item => item.ms === 60000).fn();
   assert.doesNotMatch(providers.innerHTML, /0 h 0 m/);
   assert.match(providers.innerHTML, /data-provider="claude" title="Claude · Esperando actualización · Reset —"/);
@@ -289,15 +325,15 @@ test('renderer refresh, minute tick, failure and opt-in use the minimal surface'
   assert.match(providers.innerHTML, /Stale/);
   assert.deepEqual(fills.map(fill => fill.style.strokeDasharray), ['0 100', '0 100']);
   failed = false;
-  data.limits = { claude: { value: null }, codex: { value: { usedPercent: 0 } } };
+  data.limits = { claude: { session: { value: null } }, codex: { session: { value: { usedPercent: 0 } } } };
   await vm.runInContext('refresh()', context);
   assert.match(providers.innerHTML, /Sin datos/);
   assert.match(providers.innerHTML, /0<span>%/);
   assert.match(providers.innerHTML, /DISPONIBLE/);
   assert.doesNotMatch(providers.innerHTML, /Reset \d/);
-  push({ limits: { claude: { value: { usedPercent: 12, resetsAt: Date.now() + 600000 } }, codex: { value: null } }, providers: data.providers });
+  push({ limits: { claude: { session: { value: { usedPercent: 12, resetsAt: Date.now() + 600000 } } }, codex: { session: { value: null } } }, providers: data.providers });
   assert.match(providers.innerHTML, /12<span>%/);
-  push({ limits: { claude: { value: { usedPercent: 64, resetsAt: Date.now() + 600000 }, aged: true, fetchedAt: Date.now() - 42 * 60000 }, codex: { value: null } }, providers: data.providers });
+  push({ limits: { claude: { session: { value: { usedPercent: 64, resetsAt: Date.now() + 600000 }, aged: true, fetchedAt: Date.now() - 42 * 60000 } }, codex: { session: { value: null } } }, providers: data.providers });
   assert.match(providers.innerHTML, /provider aged good/);
   assert.match(providers.innerHTML, /64<span>%/);
   assert.deepEqual(fills.map(fill => fill.style.strokeDasharray), ['64 100', '0 100']);

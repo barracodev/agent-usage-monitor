@@ -5,6 +5,8 @@ import { motionRect } from '../core/motion.js';
 const providers = document.querySelector('#providers');
 const widget = document.querySelector('.widget');
 const toggle = document.querySelector('#toggle');
+const windowSwitch = document.querySelector('#window-switch');
+const windowButtons = document.querySelectorAll('#window-switch button');
 const footer = document.querySelector('#footer');
 const footerStatus = document.querySelector('#footer-status');
 const settingsButton = document.querySelector('#settings');
@@ -19,6 +21,7 @@ let hasLoaded = false;
 let visibility;
 try { visibility = JSON.parse(localStorage.getItem(visibilityKey)) || {}; } catch { visibility = {}; }
 let expanded = false;
+let selectedWindow = 'session';
 let settingsOpen = false;
 let settingsMarkup;
 let settingsTransition = 0;
@@ -74,7 +77,7 @@ function hitTest(event) {
 // Un dato envejecido se sigue mostrando: es el mínimo de su ventana.
 const shown = state => state.key === 'live' || state.key === 'aged';
 
-function cell(name, key, entry) {
+function cell(name, key, entry, period) {
   const state = providerState(entry);
   const live = shown(state);
   const value = live ? entry.value.usedPercent : null;
@@ -82,9 +85,10 @@ function cell(name, key, entry) {
   const exhausted = tone === 'danger';
   const activeReset = live ? activeResetAt(entry) : null;
   const available = live && value === 0 && !activeReset;
-  const reset = activeReset ? formatReset(activeReset) : '—';
+  const reset = activeReset ? formatReset(activeReset, period === 'weekly') : '—';
+  const remaining = formatCountdown(activeReset, Date.now(), period === 'weekly');
   const figure = !live ? (state.key === 'stale' ? 'Stale' : '—') : `${Math.floor(value)}<span>%</span>`;
-  const countdown = state.key === 'aged' ? formatAge(entry.fetchedAt) : activeReset ? formatCountdown(activeReset) : available ? 'Sin ventana activa' : live ? 'Esperando actualización' : state.key === 'stale' ? 'Dato desactualizado' : 'Sin datos';
+  const countdown = state.key === 'aged' ? formatAge(entry.fetchedAt) : activeReset ? remaining : available ? 'Sin ventana activa' : live ? 'Esperando actualización' : state.key === 'stale' ? 'Dato desactualizado' : 'Sin datos';
   const cached = Number.isFinite(entry?.value?.usedPercent);
   return `<article class="provider ${state.key} ${tone}${glassContrast?.[key] ? ' light-text' : ''}" data-provider="${key}" title="${name}${exhausted && activeReset ? ': Sin cuota' : ''} · ${countdown} · Reset ${reset}">
     <strong class="name">${name}</strong>
@@ -99,9 +103,9 @@ function cell(name, key, entry) {
     <div class="bar" aria-hidden="true"><div class="bar-fill"></div></div>
     <div class="detail-figure">${cached ? `${Math.floor(entry.value.usedPercent)}%` : '?'}</div>
     <div class="detail-label">${activeReset ? exhausted ? 'AGOTADO' : 'Reinicia en' : available ? 'DISPONIBLE' : cached ? 'ACTUALIZANDO' : 'Sin datos'}</div>
-    <div class="detail-countdown">${activeReset ? formatCountdown(activeReset).replace(/ m$/, ' min') : available ? 'Inicia al usarla' : 'Esperando lectura'}</div>
+    <div class="detail-countdown">${activeReset ? remaining.replace(/ m$/, ' min') : available ? 'Inicia al usarla' : 'Esperando lectura'}</div>
     <div class="countdown">${countdown}</div>
-    <div class="reset">${activeReset ? `Reset ${formatReset(activeReset)}` : ''}</div>
+    <div class="reset">${activeReset ? period === 'weekly' ? reset : `Reset ${reset}` : ''}</div>
   </article>`;
 }
 
@@ -139,18 +143,22 @@ function renderSettings() {
 
 function render() {
   const activeProviders = visibleProviders();
+  const period = expanded ? selectedWindow : 'session';
+  const entryFor = key => latest.limits[key]?.[period];
+  windowSwitch.hidden = !expanded;
+  for (const button of windowButtons) button.setAttribute('aria-pressed', String(button.dataset.window === selectedWindow));
   widget.dataset.count = String(activeProviders.length);
   providers.dataset.count = String(activeProviders.length);
   providers.hidden = activeProviders.length === 0;
   emptyState.hidden = activeProviders.length !== 0;
-  providers.innerHTML = activeProviders.map(provider => cell(provider.name, provider.key, latest.limits[provider.key])).join('');
+  providers.innerHTML = activeProviders.map(provider => cell(provider.name, provider.key, entryFor(provider.key), period)).join('');
   for (const element of providers.children) {
-    const entry = latest.limits[element.dataset.provider];
+    const entry = entryFor(element.dataset.provider);
     // CSSOM actualiza el arco sin abrir la CSP a estilos inline.
     element.querySelector('.fill').style.strokeDasharray = `${shown(providerState(entry)) ? entry.value.usedPercent : 0} 100`;
     element.querySelector('.bar-fill').style.height = `${Number.isFinite(entry?.value?.usedPercent) ? entry.value.usedPercent : 0}%`;
   }
-  const entries = activeProviders.map(provider => latest.limits[provider.key]);
+  const entries = activeProviders.map(provider => entryFor(provider.key));
   const old = entries.find(entry => ['aged', 'stale'].includes(providerState(entry).key));
   const stamps = entries.map(entry => entry?.fetchedAt).filter(Number.isFinite);
   const oldProvider = old && activeProviders[entries.indexOf(old)];
@@ -158,10 +166,11 @@ function render() {
   footerStatus.innerHTML = old ? `⚠ ${oldProvider.name} · ${Number.isFinite(old.fetchedAt) ? formatAge(old.fetchedAt) : 'Sin lectura reciente'}` : stamps.length ? `${iconMarkup('refresh-cw')}<span>${formatReset(Math.min(...stamps))}</span>` : 'Esperando lectura';
   footerStatus.setAttribute('aria-label', stamps.length && !old ? `Actualizado ${formatReset(Math.min(...stamps))}` : footerStatus.textContent || 'Estado de actualización');
   footer.classList.toggle('light-text', glassContrast?.footer === true);
+  windowSwitch.classList.toggle('light-text', glassContrast?.window === true);
   emptyState.classList.toggle('light-text', glassContrast?.footer === true);
   settingsMenu.classList.toggle('light-text', glassContrast?.footer === true);
   renderSettings();
-  void syncLayout();
+  return syncLayout();
 }
 
 async function openSettings() {
@@ -200,7 +209,7 @@ async function setExpanded(value) {
   toggle.setAttribute('aria-label', value ? 'Ocultar detalle de uso' : 'Mostrar detalle de uso');
   if (value) {
     expanded = true;
-    await syncLayout();
+    await render();
     if (current !== transition) return;
     widget.classList.remove('closing');
     widget.classList.add('expanded');
@@ -212,7 +221,7 @@ async function setExpanded(value) {
   }
   widget.classList.remove('opening');
   widget.classList.add('closing');
-  await syncLayout();
+  await render();
   await waitForMotion();
   if (current !== transition) return;
   widget.classList.remove('expanded');
@@ -254,13 +263,18 @@ toggle.addEventListener('pointercancel', () => { if (moveFrame !== null) cancelA
 
 async function refresh(force = false) {
   try { latest = await window.usageMonitor.read(force); }
-  catch { for (const entry of Object.values(latest.limits)) entry.stale = true; }
+  catch { for (const windows of Object.values(latest.limits)) for (const entry of Object.values(windows)) entry.stale = true; }
   hasLoaded = true;
   render();
 }
 
 settingsButton.innerHTML = iconMarkup('settings');
 emptyIcon.innerHTML = iconMarkup('eye-off');
+for (const button of windowButtons) button.addEventListener('click', event => {
+  event.stopPropagation();
+  selectedWindow = button.dataset.window;
+  render();
+});
 settingsButton.addEventListener('click', event => { event.stopPropagation(); settingsOpen ? void closeSettings() : void openSettings(); });
 document.addEventListener('pointerdown', event => { if (settingsOpen && !settingsMenu.contains(event.target) && !settingsButton.contains(event.target)) void closeSettings(); });
 document.addEventListener('keydown', event => { if (event.key === 'Escape' && settingsOpen) { event.stopPropagation(); void closeSettings(); } });

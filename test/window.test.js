@@ -5,6 +5,7 @@ import vm from 'node:vm';
 import { EventEmitter } from 'node:events';
 import { createClock } from './helpers/clock.js';
 import { MOTION_MS, motionRect } from '../src/core/motion.js';
+import { projectClaude, projectCodex } from '../src/core/limits.js';
 
 async function layoutHarness(bounds, clock = createClock()) {
   const source = (await readFile(new URL('../src/main/index.js', import.meta.url), 'utf8')).replace(/^import .*;$/gm, '').replaceAll('import.meta.url', '"file:///widget"');
@@ -78,7 +79,7 @@ async function startupHarness({ saved = { x: 1200, y: 500 }, files = new Map(), 
   }
   const context = vm.createContext({
     path: { dirname: () => 'profile', join: (...parts) => parts.join('/') }, fileURLToPath: () => '',
-    createClaudeClient: () => ({}), createCodexClient: () => ({}), resolveExecutable: () => 'tool.exe', BrowserWindow: Widget, nativeTheme: {},
+    createClaudeClient: () => ({}), createCodexClient: () => ({}), resolveExecutable: () => 'tool.exe', BrowserWindow: Widget, nativeTheme: {}, projectClaude, projectCodex,
     app: { requestSingleInstanceLock: () => false, quit() {}, getPath: () => 'profile' },
     process: { pid: 42 }, readFile: async () => files.get('profile/window.json') || JSON.stringify(saved),
     mkdir: async () => {}, writeFile: async (file, data) => files.set(file, data), rename: async (...args) => rename(...args),
@@ -103,6 +104,38 @@ async function startupHarness({ saved = { x: 1200, y: 500 }, files = new Map(), 
     failGlass() { failPanel = true; scaleFactor = 2; }, failSave() { failRename = true; },
   };
 }
+
+test('el dashboard proyecta cada ventana por separado y comparte la antigüedad y el error de lectura', async () => {
+  const h = await startupHarness();
+  const now = Date.now();
+  const fetchedAt = now - 1000;
+  for (const provider of ['claude', 'codex']) {
+    for (const expired of ['session', 'weekly']) {
+      const active = expired === 'session' ? 'weekly' : 'session';
+      h.context.reading = { session: { usedPercent: 12, resetsAt: now + 3600000 }, weekly: { usedPercent: 32, resetsAt: now + 86400000 }, fetchedAt };
+      h.context.reading[expired].resetsAt = now - 1;
+      await h.call(`update('${provider}', async () => reading)`);
+      const limits = (await h.call('dashboard()')).limits[provider];
+      assert.equal(limits[expired].value, null);
+      assert.equal(limits[active].value.usedPercent, active === 'weekly' ? 32 : 12);
+      for (const window of Object.values(limits)) {
+        assert.equal(window.fetchedAt, fetchedAt);
+        assert.equal(window.error, null);
+      }
+      await h.call(`update('${provider}', async () => { throw new Error('Sin conexión'); })`);
+      const failed = (await h.call('dashboard()')).limits[provider];
+      assert.equal(failed[active].stale, true);
+      assert.equal(failed[active].value.usedPercent, limits[active].value.usedPercent);
+      assert.equal(failed[active].error, 'Sin conexión');
+      assert.equal(failed[expired].error, 'Sin conexión');
+    }
+    h.context.reading = { session: null, weekly: { usedPercent: 0 }, fetchedAt };
+    await h.call(`update('${provider}', async () => reading)`);
+    const partial = (await h.call('dashboard()')).limits[provider];
+    assert.equal(partial.session.value, null);
+    assert.equal(partial.weekly.value.usedPercent, 0);
+  }
+});
 
 test('el arrastre guarda sin moved y el cierre termina el guardado sin dejar temporales', async () => {
   const h = await startupHarness();
@@ -273,7 +306,7 @@ test('tras una animación, abrir y cerrar parten de la posición que Windows hay
   const host = h.widget.getBounds();
   h.widget.setPosition(host.x + 300 - h.bounds().x, host.y + 80 - h.bounds().y);
   await h.layout(true, { reduceMotion: false }); await clock.advance(400);
-  assert.deepEqual(h.bounds(), { x: 300, y: 80, width: 384, height: 256 });
+  assert.deepEqual(h.bounds(), { x: 300, y: 80, width: 384, height: 290 });
 });
 
 test('arrastrar durante una animación completa el tamaño del panel en la posición nueva', async () => {
@@ -284,7 +317,7 @@ test('arrastrar durante una animación completa el tamaño del panel en la posic
   h.handlers['monitor:move'](h.event, 500, 300);
   await clock.advance(1000);
   await h.layout(true);
-  assert.deepEqual(h.bounds(), { x: 500, y: 300, width: 384, height: 256 });
+  assert.deepEqual(h.bounds(), { x: 500, y: 300, width: 384, height: 290 });
   assert.equal(vm.runInContext('glassMorph', h.context), 1);
 });
 
@@ -318,7 +351,7 @@ test('la superficie sigue el progreso de los frames sin redimensionar la ventana
   await clock.advance(128);
   assert.ok(h.bounds().width > 110, 'el avance debe seguir el progreso del renderer');
   await clock.advance(motion.duration + motion.delay + 16 - 128);
-  assert.deepEqual(h.bounds(), { x: 100, y: 80, width: 384, height: 256 });
+  assert.deepEqual(h.bounds(), { x: 100, y: 80, width: 384, height: 290 });
 });
 
 test('el IPC de movimiento espera a que la ventana termine, incluso tras una pausa larga', async () => {
@@ -368,7 +401,7 @@ test('widget IPC conserva dirección, límites, tamaños e invalidación', async
   const h = await layoutHarness({ x: 1750, y: 840, width: 98, height: 194 });
   const transition = await h.layout(true);
   assert.deepEqual(JSON.parse(JSON.stringify(transition.placement)), { horizontal: 'left', vertical: 'up' });
-  assert.deepEqual(h.bounds(), { x: 1464, y: 778, width: 384, height: 256 });
+  assert.deepEqual(h.bounds(), { x: 1464, y: 744, width: 384, height: 290 });
   assert.ok(h.bounds().x >= 0 && h.bounds().x + h.bounds().width <= 1920);
   assert.ok(h.bounds().y >= 0 && h.bounds().y + h.bounds().height <= 1040);
   await vm.runInContext('writePosition()', h.context);
@@ -379,8 +412,8 @@ test('widget IPC conserva dirección, límites, tamaños e invalidación', async
   for (const [expanded, providers, selectorOpen, width, height] of [
     [false, ['claude', 'codex'], false, 98, 194],
     [false, ['claude'], false, 98, 122], [false, [], false, 206, 122],
-    [false, ['claude'], false, 98, 122], [true, ['claude'], false, 230, 256],
-    [true, ['claude'], true, 384, 256], [false, ['claude'], false, 98, 122],
+    [false, ['claude'], false, 98, 122], [true, ['claude'], false, 230, 290],
+    [true, ['claude'], true, 384, 290], [false, ['claude'], false, 98, 122],
   ]) {
     await h.layout(expanded, { providers, selectorOpen });
     assert.deepEqual([h.bounds().width, h.bounds().height], [width, height]);
@@ -452,24 +485,30 @@ test('native glass follows the capsule, expansion and display scale, and closes 
   assert.equal(panel.shown, true);
   const event = { sender: window.webContents, senderFrame: { url: 'file:///widget' } };
   handlers['monitor:layout'](event, { expanded: true, selectorOpen: false, reduceMotion: true, providers: ['claude', 'codex'] });
-  assert.deepEqual(JSON.parse(JSON.stringify(panel.bounds)), { x: 160, y: 275, width: 410, height: 250 });
+  assert.deepEqual(JSON.parse(JSON.stringify(panel.bounds)), { x: 160, y: 275, width: 410, height: 293 });
   assert.equal(panel.params.cornerRadius, 27.5);
   assert.equal(panel.params.blurSigma, 7.5, 'native blur must reach the expanded value with the geometry');
-  assert.equal(panel.bands.length, 3, 'the two provider columns and footer need separate contrast samples');
+  assert.equal(panel.bands.length, 4, 'the two provider columns, footer and window switch need separate contrast samples');
+  assert.deepEqual(JSON.parse(JSON.stringify(panel.bands)), [
+    { id: 0, x: 0, y: 43, width: 205, height: 197 },
+    { id: 1, x: 205, y: 43, width: 205, height: 197 },
+    { id: 2, x: 0, y: 240, width: 410, height: 53 },
+    { id: 3, x: 0, y: 0, width: 410, height: 43 },
+  ]);
   const sample = value => ({ r: value, g: value, b: value, darkTail: value, lightTail: value });
-  panel.options.onLuma({ 0: sample(10), 1: sample(240), 2: sample(240) });
-  assert.deepEqual(JSON.parse(JSON.stringify(messages.at(-1))), ['monitor:glass', { claude: true, codex: false, footer: false }]);
+  panel.options.onLuma({ 0: sample(10), 1: sample(240), 2: sample(240), 3: sample(10) });
+  assert.deepEqual(JSON.parse(JSON.stringify(messages.at(-1))), ['monitor:glass', { claude: true, codex: false, footer: false, window: true }]);
   const count = messages.length;
   panel.options.onLuma({ 0: sample(12), 1: sample(240), 2: sample(240) });
   assert.equal(messages.length, count, 'unchanged contrast must not flood IPC');
   window.webContents.emit('did-finish-load');
   assert.equal(messages.length, count + 1, 'reloading the renderer must restore glass without waiting for a background change');
-  assert.deepEqual(JSON.parse(JSON.stringify(messages.at(-1))), ['monitor:glass', { claude: true, codex: false, footer: false }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(messages.at(-1))), ['monitor:glass', { claude: true, codex: false, footer: false, window: true }]);
   assert.equal(vm.runInContext('getSurfaceBounds().width', context), 98, 'reloading must match the renderer, which starts collapsed');
   assert.equal(panel.bounds.width, 53, 'reloading must not leave expanded glass behind a collapsed capsule');
   handlers['monitor:layout'](event, { expanded: true, selectorOpen: false, reduceMotion: true, providers: ['claude', 'codex'] });
-  panel.options.onLuma({ 0: sample(240), 1: sample(10), 2: sample(10) });
-  assert.deepEqual(JSON.parse(JSON.stringify(messages.at(-1))), ['monitor:glass', { claude: false, codex: true, footer: true }]);
+  panel.options.onLuma({ 0: sample(240), 1: sample(10), 2: sample(10), 3: sample(240) });
+  assert.deepEqual(JSON.parse(JSON.stringify(messages.at(-1))), ['monitor:glass', { claude: false, codex: true, footer: true, window: false }]);
   window.visible = false;
   window.emit('hide');
   assert.equal(panel.shown, false);
@@ -477,7 +516,7 @@ test('native glass follows the capsule, expansion and display scale, and closes 
   window.show();
   assert.equal(panel.destroyed, true, 'changing display scale must recreate the native DPR');
   assert.equal(panels.length, 2);
-  assert.deepEqual(JSON.parse(JSON.stringify(panels[1].bounds, ['x', 'y', 'width', 'height'])), { x: 256, y: 440, width: 656, height: 400 });
+  assert.deepEqual(JSON.parse(JSON.stringify(panels[1].bounds, ['x', 'y', 'width', 'height'])), { x: 256, y: 440, width: 656, height: 468 });
   window.emit('closed');
   assert.equal(panels[1].destroyed, true, 'closing must not leave a native window behind');
 });

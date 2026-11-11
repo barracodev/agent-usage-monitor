@@ -15,9 +15,10 @@ test('normalizeClaudeUsage maps the account rate limits', () => {
     five_hour: { utilization: 27, resets_at: '2026-09-05T20:30:00Z' },
     seven_day: { utilization: 18, resets_at: '2026-09-11T00:00:00Z' },
   }, 1000);
-  assert.equal(actual.usedPercent, 27);
-  assert.equal(actual.resetsAt, Date.parse('2026-09-05T20:30:00Z'));
-  assert.equal('weekly' in actual, false);
+  assert.equal(actual.session.usedPercent, 27);
+  assert.equal(actual.session.resetsAt, Date.parse('2026-09-05T20:30:00Z'));
+  assert.equal(actual.weekly.usedPercent, 18);
+  assert.equal(actual.weekly.resetsAt, Date.parse('2026-09-11T00:00:00Z'));
   assert.equal(actual.fetchedAt, 1000);
 });
 
@@ -26,14 +27,15 @@ test('normalizeClaudeUsage is fail-closed without numeric windows', () => {
   assert.equal(normalizeClaudeUsage(null), null);
 });
 
-test('normalizeCodexUsage maps only the primary five-hour window', () => {
+test('normalizeCodexUsage maps session and weekly windows', () => {
   const actual = normalizeCodexUsage({ rateLimits: {
     primary: { usedPercent: 28, windowDurationMins: 300, resetsAt: 1788650648 },
     secondary: { usedPercent: 4, windowDurationMins: 10080, resetsAt: 1789237448 },
   } });
-  assert.equal(actual.usedPercent, 28);
-  assert.equal(actual.resetsAt, 1788650648000);
-  assert.equal('weekly' in actual, false);
+  assert.equal(actual.session.usedPercent, 28);
+  assert.equal(actual.session.resetsAt, 1788650648000);
+  assert.equal(actual.weekly.usedPercent, 4);
+  assert.equal(actual.weekly.resetsAt, 1789237448000);
 });
 
 test('normalizeCodexUsage rejects a non-five-hour primary window', () => {
@@ -85,5 +87,43 @@ test('explicit null, blank and boolean percentages are not zero', () => {
     assert.equal(normalizeClaudeUsage({ five_hour: { used_percent: value } }), null);
     assert.equal(normalizeCodexUsage({ rateLimits: { primary: { used_percent: value, windowDurationMins: 300 } } }), null);
   }
-  assert.equal(normalizeClaudeUsage({ five_hour: { utilization: 0 } }).usedPercent, 0);
+  assert.equal(normalizeClaudeUsage({ five_hour: { utilization: 0 } }).session.usedPercent, 0);
+});
+
+test('cada ventana válida sobrevive aunque falte o sea inválida la otra', () => {
+  for (const [normalize, wrap, sessionKey, weeklyKey] of [
+    [normalizeClaudeUsage, limits => ({ rate_limits: limits }), 'five_hour', 'seven_day'],
+    [normalizeCodexUsage, limits => ({ rateLimits: limits }), 'primary', 'secondary'],
+  ]) {
+    for (const [key, period, duration] of [[sessionKey, 'session', 300], [weeklyKey, 'weekly', 10080]]) {
+      const other = period === 'session' ? 'weekly' : 'session';
+      const otherKey = period === 'session' ? weeklyKey : sessionKey;
+      for (const invalid of [undefined, { utilization: null }, { usedPercent: 'mucho' }]) {
+        const result = normalize(wrap({ [key]: { utilization: '132', resets_at: '2026-11-12T03:59:59.911921+00:00', windowDurationMins: duration }, [otherKey]: invalid }), 1234);
+        assert.equal(result[period].usedPercent, 100);
+        assert.equal(result[period].resetsAt, Date.parse('2026-11-12T03:59:59.911921+00:00'));
+        assert.equal(result[period].fetchedAt, 1234);
+        assert.equal(result[other], null);
+        assert.equal(result.fetchedAt, 1234);
+      }
+    }
+  }
+});
+
+test('Codex solo acepta primary de 300 min y secondary de 10080 min', () => {
+  const weekly = { usedPercent: 32, windowDurationMins: 10080, resetsAt: 1794423188 };
+  const actual = normalizeCodexUsage({ rateLimits: { primary: { usedPercent: 10, windowDurationMins: 60 }, secondary: weekly } });
+  assert.equal(actual.session, null);
+  assert.equal(actual.weekly.usedPercent, 32);
+  assert.equal(actual.weekly.resetsAt, 1794423188000);
+  for (const duration of [undefined, null, 300, 10079, 10081]) {
+    assert.equal(normalizeCodexUsage({ rateLimits: { secondary: { ...weekly, windowDurationMins: duration } } }), null);
+  }
+});
+
+test('el reinicio semanal incluye el día local sin cambiar el formato de sesión', () => {
+  const at = new Date(2026, 10, 11, 21, 59).getTime();
+  assert.equal(formatReset(at, true), 'mié 9:59pm');
+  assert.equal(formatReset(at), '9:59pm');
+  assert.equal(formatReset(null, true), '—');
 });

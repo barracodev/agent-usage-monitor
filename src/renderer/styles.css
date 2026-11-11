@@ -30,26 +30,30 @@ button { -webkit-app-region: no-drag; font: inherit; cursor: pointer; }
 .figure span { margin-left: 1px; font-size: 8px; }
 .figure.label { font-size: 8px; }
 .name, .countdown, .reset { position: absolute; top: 0; left: 0; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-.bar, .detail-figure, .detail-label, .detail-countdown, .footer, .settings { display: none; }
+.bar, .detail-figure, .detail-label, .detail-countdown, .footer, .settings, .window-switch { display: none; }
 .unknown .figure, .stale .figure { color: #888; }
 .aged .figure, .aged .gauge { opacity: .5; }
-.widget.expanded { width: 174px; height: 200px; padding: 17px; border-radius: 22px; }
+.widget.expanded { width: 174px; height: 234px; padding: 17px; border-radius: 22px; }
+.expanded .window-switch { position: absolute; z-index: 2; top: 8px; left: 17px; right: 17px; display: flex; height: 24px; gap: 2px; color: var(--glass-ink, #444); }
+.window-switch[hidden] { display: none; }
+.window-switch button { flex: 1; min-width: 0; border: 1px solid transparent; border-radius: 7px; padding: 0 5px; background: transparent; color: inherit; font-size: 11px; }
+.window-switch button[aria-pressed="true"] { border-color: var(--glass-line, #ccc); background: rgb(128 128 128 / 16%); font-weight: 700; }
 .widget.expanded[data-open-horizontal="left"] { right: 28px; left: auto; }
 .widget.expanded[data-open-horizontal="right"] { right: auto; left: 28px; }
 .widget.expanded[data-open-vertical="up"] { top: auto; bottom: 36px; }
 .widget.expanded[data-open-vertical="center"] { top: calc(50% - 8px); bottom: auto; transform: translateY(-50%); }
 .widget.expanded[data-open-vertical="down"] { top: 20px; bottom: auto; }
 .widget.opening, .widget.closing { overflow: hidden; }
-.widget.opening #providers, .widget.opening .empty-state, .widget.opening .footer { animation: content-in 220ms cubic-bezier(.22, 1, .36, 1) both; }
-.widget.closing #providers, .widget.closing .empty-state, .widget.closing .footer { animation: content-out 150ms ease-in both; }
+.widget.opening #providers, .widget.opening .empty-state, .widget.opening .footer, .widget.opening .window-switch { animation: content-in 220ms cubic-bezier(.22, 1, .36, 1) both; }
+.widget.closing #providers, .widget.closing .empty-state, .widget.closing .footer, .widget.closing .window-switch { animation: content-out 150ms ease-in both; }
 .widget.expanded:not(.closing) { box-shadow: 0 12px 34px rgb(0 0 0 / 15%); }
 .widget.expanded.closing { border-radius: 21px; box-shadow: 0 4px 14px rgb(0 0 0 / 8%); }
 .expanded[data-count="2"], .expanded.selector-open { width: 328px; }
-.expanded #providers { flex-direction: row; justify-content: flex-start; gap: 14px; height: 127px; }
+.expanded #providers { flex-direction: row; justify-content: flex-start; gap: 14px; height: 127px; margin-top: 34px; }
 .expanded .provider { align-items: flex-start; min-width: 0; padding-left: 21px; gap: 0; }
 .expanded #providers[data-count="1"] .provider { flex: 1 1 0; }
 .expanded .provider + .provider { border-left: 1px solid #ddd; padding-left: 35px; }
-.expanded .empty-state { height: 127px; justify-content: center; padding: 0; }
+.expanded .empty-state { height: 127px; margin-top: 34px; justify-content: center; padding: 0; }
 .expanded .empty-state > span:first-child { width: 34px; height: 34px; flex-basis: 34px; }
 .expanded .empty-state strong { font-size: 13px; line-height: 17px; }
 .expanded .empty-state small { font-size: 9px; line-height: 13px; }
@@ -82,7 +86,7 @@ button { -webkit-app-region: no-drag; font: inherit; cursor: pointer; }
 .icon-eye-off { mask-image: url('icons/eye-off.svg'); }
 .icon-settings { mask-image: url('icons/settings.svg'); }
 .icon-refresh-cw { mask-image: url('icons/refresh-cw.svg'); }
-.settings:focus-visible, .visibility:focus-visible, .install:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+.settings:focus-visible, .visibility:focus-visible, .install:focus-visible, .window-switch button:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
 .footer .outdated { color: #777; font-weight: 700; }
 .settings-menu[hidden] { display: none; }
 .settings-menu { position: absolute; z-index: 4; right: 12px; bottom: 38px; width: 294px; margin: 0; border: 1px solid #aaa; padding: 12px; border-radius: 12px; background: #fff; color: #333; box-shadow: 0 14px 38px rgb(0 0 0 / 24%); opacity: 0; transform: translateY(5px); transition: opacity 130ms ease, transform 160ms cubic-bezier(.22, 1, .36, 1), box-shadow 160ms ease; }

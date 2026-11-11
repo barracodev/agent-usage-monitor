@@ -48,12 +48,14 @@ test('Claude lee uso de cuenta actualizado sin mandar mensajes al modelo', async
   } });
   try {
     const first = await client.read();
-    assert.equal(first.usedPercent, 4);
-    assert.equal(first.provider, 'claude');
-    assert.equal(first.resetsAt, Date.parse('2026-10-21T05:49:00Z'));
-    assert.deepEqual(Object.keys(first).sort(), ['fetchedAt', 'provider', 'resetsAt', 'usedPercent']);
+    assert.equal(first.session.usedPercent, 4);
+    assert.equal(first.session.provider, 'claude');
+    assert.equal(first.session.resetsAt, Date.parse('2026-10-21T05:49:00Z'));
+    assert.equal(first.weekly.usedPercent, 80);
+    assert.deepEqual(Object.keys(first).sort(), ['fetchedAt', 'session', 'weekly']);
+    assert.deepEqual(Object.keys(first.session).sort(), ['fetchedAt', 'provider', 'resetsAt', 'usedPercent']);
     children[0].usedPercent = 23;
-    assert.equal((await client.read()).usedPercent, 23);
+    assert.equal((await client.read()).session.usedPercent, 23);
     assert.equal(children.length, 1);
     assert.equal(received.name, 'claude');
     assert.ok(received.args.includes('--safe-mode'));
@@ -81,7 +83,7 @@ test('Claude rechaza datos ausentes o inválidos y permite recuperar la lectura'
     body = { rate_limits_available: false, rate_limits: { five_hour: { utilization: 20 } } };
     await assert.rejects(client.read(), /ventana|límites/);
     body = { rate_limits_available: true, rate_limits: { five_hour: { utilization: 0 } } };
-    assert.equal((await client.read()).usedPercent, 0);
+    assert.equal((await client.read()).session.usedPercent, 0);
     assert.equal(children.length, 1);
   } finally { client.close(); }
 });
@@ -98,7 +100,7 @@ test('Claude consulta cuotas aunque el entorno del usuario bloquee tráfico no e
         reply: () => Object.keys(options.env).some(inherited => inherited.toUpperCase() === key) ? { rate_limits_available: false } : undefined,
       }) });
       try {
-        assert.equal((await client.read()).usedPercent, 4);
+        assert.equal((await client.read()).session.usedPercent, 4);
         assert.equal(process.env[name], '1');
       } finally { client.close(); }
     }
@@ -116,7 +118,7 @@ test('Claude descarta el cliente si muere y lo relanza en la siguiente lectura',
     await new Promise(resolve => setImmediate(resolve));
     children[0].emit('close', 1);
     await assert.rejects(pending, /terminó/);
-    assert.equal((await client.read()).usedPercent, 4);
+    assert.equal((await client.read()).session.usedPercent, 4);
     assert.equal(children.length, 2);
   } finally { client.close(); }
 });
@@ -159,7 +161,7 @@ test('Claude vuelve a inicializar después de fallar la conexión inicial', asyn
   try {
     await assert.rejects(client.read(), /consultar los límites/);
     assert.equal(children[0].killed, true);
-    assert.equal((await client.read()).usedPercent, 4);
+    assert.equal((await client.read()).session.usedPercent, 4);
     assert.equal(children.length, 2);
   } finally { client.close(); }
 });
@@ -193,9 +195,9 @@ test('createCodexClient reutiliza un app-server sin shell y pide lecturas ligera
   const children = [];
   let received;
   const client = createCodexClient({ timeoutMs: 1000, spawnCliImpl: (name, args, options) => { received = { name, args, options }; return fakeCodex(children); } });
-  assert.equal((await client.read()).usedPercent, 28);
+  assert.equal((await client.read()).session.usedPercent, 28);
   children[0].usedPercent = 35;
-  assert.equal((await client.read()).usedPercent, 35);
+  assert.equal((await client.read()).session.usedPercent, 35);
   assert.equal(children.length, 1);
   assert.deepEqual([received.name, received.args, received.options.shell], ['codex', ['app-server', '--stdio'], undefined]);
   const reads = children[0].requests.filter(message => message.method === 'account/rateLimits/read');
@@ -216,7 +218,7 @@ test('Codex ignora peticiones del servidor e ids sin respuesta aunque coincidan 
     }
     return null;
   } }) });
-  try { assert.equal((await client.read()).usedPercent, 28); }
+  try { assert.equal((await client.read()).session.usedPercent, 28); }
   finally { client.close(); }
 });
 
@@ -226,7 +228,7 @@ test('createCodexClient rechaza errores de lectura sin relanzar el proceso', asy
   const client = createCodexClient({ spawnCliImpl: () => fakeCodex(children, { reply: () => fail ? { error: { message: 'chatgpt authentication required' } } : null }) });
   await assert.rejects(client.read(), /authentication required/);
   fail = false;
-  assert.equal((await client.read()).usedPercent, 28);
+  assert.equal((await client.read()).session.usedPercent, 28);
   assert.equal(children.length, 1);
   client.close();
 });
@@ -238,7 +240,7 @@ test('createCodexClient rechaza si el app-server muere y lo relanza en la siguie
   await new Promise(resolve => setImmediate(resolve));
   children[0].emit('close', 1);
   await assert.rejects(pending, /terminó/);
-  assert.equal((await client.read()).usedPercent, 28);
+  assert.equal((await client.read()).session.usedPercent, 28);
   assert.equal(children.length, 2);
   client.close();
 });
@@ -253,4 +255,26 @@ test('createCodexClient vence una lectura colgada y descarta el proceso', async 
 test('createCodexClient rechaza si codex no está instalado', async () => {
   const client = createCodexClient({ spawnCliImpl: () => { throw new Error('No encontré codex en el PATH'); } });
   await assert.rejects(client.read(), /PATH/);
+});
+
+test('ambos clientes aceptan solo la semanal y rechazan si ninguna ventana es válida', async () => {
+  for (const provider of ['claude', 'codex']) {
+    const children = [];
+    const weekly = provider === 'claude' ? { rate_limits: { seven_day: { utilization: 32 } } }
+      : { rateLimits: { secondary: { usedPercent: 32, windowDurationMins: 10080 } } };
+    let body = weekly;
+    const client = provider === 'claude'
+      ? data.createClaudeClient({ spawnCliImpl: () => fakeClaude(children, { reply: () => body }) })
+      : createCodexClient({ spawnCliImpl: () => fakeCodex(children, { reply: () => ({ result: body }) }) });
+    try {
+      const actual = await client.read();
+      assert.equal(actual.session, null);
+      assert.equal(actual.weekly.usedPercent, 32);
+      body = {};
+      await assert.rejects(client.read(), /ventana|límites/);
+      body = weekly;
+      assert.equal((await client.read()).weekly.usedPercent, 32);
+      assert.equal(children.length, 1);
+    } finally { client.close(); }
+  }
 });

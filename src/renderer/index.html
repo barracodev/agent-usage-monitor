@@ -9,7 +9,11 @@
 </head>
 <body>
   <main class="widget" aria-label="Uso de asistentes de IA">
-    <button id="toggle" class="toggle" aria-label="Mostrar detalle de uso" aria-expanded="false" aria-controls="providers footer"></button>
+    <button id="toggle" class="toggle" aria-label="Mostrar detalle de uso" aria-expanded="false" aria-controls="window-switch providers footer"></button>
+    <div id="window-switch" class="window-switch" role="group" aria-label="Ventana de uso" hidden>
+      <button type="button" data-window="session" aria-pressed="true">Sesión</button>
+      <button type="button" data-window="weekly" aria-pressed="false">Semanal</button>
+    </div>
     <section id="providers" aria-live="polite"></section>
     <section id="empty-state" class="empty-state" hidden>
       <span id="empty-icon" aria-hidden="true"></span>

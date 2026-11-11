@@ -29,6 +29,11 @@ test('countdown follows reset time, rounds up minutes and never goes negative', 
   assert.equal(formatCountdown(now + 1, now), '0 h 1 m');
   assert.equal(formatCountdown(now - 1, now), '0 h 0 m');
   assert.equal(formatCountdown(null, now), '—');
+  assert.equal(formatCountdown(now + 24 * 3600000, now), '24 h 0 m');
+  assert.equal(formatCountdown(now + 24 * 3600000 + 1, now), '24 h 1 m');
+  assert.equal(formatCountdown(now + 24 * 3600000, now, true), '24 h 0 m');
+  assert.equal(formatCountdown(now + 24 * 3600000 + 1, now, true), '1 d 1 h');
+  assert.equal(formatCountdown(now + 51 * 3600000, now, true), '2 d 3 h');
 });
 
 test('a reset solo existe mientras hay consumo y la ventana sigue activa', () => {
