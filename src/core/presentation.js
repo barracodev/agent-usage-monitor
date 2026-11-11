@@ -26,9 +26,9 @@ export function formatCountdown(resetAt, now = Date.now(), includeDays = false) 
   return `${Math.floor(minutes / 60)} h ${minutes % 60} m`;
 }
 
-// Una cuota en 0 % todavía no tiene una ventana activa, aunque el proveedor anuncie una fecha.
-export function activeResetAt(entry, now = Date.now()) {
+// El semanal de Claude tiene un reset fijo incluso sin consumo.
+export function activeResetAt(entry, now = Date.now(), fixedWindow = false) {
   const used = entry?.value?.usedPercent;
   const reset = entry?.value?.resetsAt;
-  return Number.isFinite(used) && used > 0 && Number.isFinite(reset) && reset > now ? reset : null;
+  return Number.isFinite(used) && (used > 0 || (fixedWindow && used === 0)) && Number.isFinite(reset) && reset > now ? reset : null;
 }

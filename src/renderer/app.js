@@ -83,7 +83,7 @@ function cell(name, key, entry, period) {
   const value = live ? entry.value.usedPercent : null;
   const tone = meterTone(value);
   const exhausted = tone === 'danger';
-  const activeReset = live ? activeResetAt(entry) : null;
+  const activeReset = live ? activeResetAt(entry, Date.now(), key === 'claude' && period === 'weekly') : null;
   const available = live && value === 0 && !activeReset;
   const reset = activeReset ? formatReset(activeReset, period === 'weekly') : '—';
   const remaining = formatCountdown(activeReset, Date.now(), period === 'weekly');
@@ -105,7 +105,7 @@ function cell(name, key, entry, period) {
     <div class="detail-label">${activeReset ? exhausted ? 'AGOTADO' : 'Reinicia en' : available ? 'DISPONIBLE' : cached ? 'ACTUALIZANDO' : 'Sin datos'}</div>
     <div class="detail-countdown">${activeReset ? remaining.replace(/ m$/, ' min') : available ? 'Inicia al usarla' : 'Esperando lectura'}</div>
     <div class="countdown">${countdown}</div>
-    <div class="reset">${activeReset ? period === 'weekly' ? reset : `Reset ${reset}` : ''}</div>
+    <div class="reset">${activeReset ? `Reset ${reset}` : ''}</div>
   </article>`;
 }
 
@@ -143,9 +143,10 @@ function renderSettings() {
 
 function render() {
   const activeProviders = visibleProviders();
-  const period = expanded ? selectedWindow : 'session';
+  const detail = expanded || widget.classList.contains('expanded');
+  const period = detail ? selectedWindow : 'session';
   const entryFor = key => latest.limits[key]?.[period];
-  windowSwitch.hidden = !expanded;
+  windowSwitch.hidden = !detail;
   for (const button of windowButtons) button.setAttribute('aria-pressed', String(button.dataset.window === selectedWindow));
   widget.dataset.count = String(activeProviders.length);
   providers.dataset.count = String(activeProviders.length);
@@ -226,6 +227,7 @@ async function setExpanded(value) {
   if (current !== transition) return;
   widget.classList.remove('expanded');
   widget.classList.remove('closing');
+  return render();
 }
 
 toggle.addEventListener('click', event => { if (!dragged || event.detail === 0) setExpanded(!expanded); });

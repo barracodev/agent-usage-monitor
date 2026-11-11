@@ -14,7 +14,7 @@ async function settingsHarness() {
   for (const selector of ['#providers', '.widget', '#toggle', '#window-switch', '#session', '#weekly', '#footer', '#footer-status', '#settings', '#settings-menu', '#provider-settings', '#empty-state', '#empty-icon']) {
     const classes = new Set();
     elements[selector] = { style: {}, dataset: {}, children: [], hidden: true, innerHTML: '', attributes: {}, listeners: {}, classes,
-      classList: { add: name => classes.add(name), remove: name => classes.delete(name), toggle: (name, on) => on ? classes.add(name) : classes.delete(name) },
+      classList: { contains: name => classes.has(name), add: name => classes.add(name), remove: name => classes.delete(name), toggle: (name, on) => on ? classes.add(name) : classes.delete(name) },
       setAttribute(name, value) { this.attributes[name] = value; }, addEventListener(name, fn) { this.listeners[name] = fn; }, contains: () => false,
     };
   }
@@ -62,8 +62,15 @@ test('el switch cambia todos los proveedores y la cápsula conserva sesión al c
   h.call('glassContrast = { window: true, footer: false }; render()');
   assert.equal(h.elements['#window-switch'].classes.has('light-text'), true);
   assert.equal(h.elements['#footer'].classes.has('light-text'), false);
+  h.holdMotion();
   const closing = h.call('setExpanded(false)');
   await h.clock.advance(1000);
+  assert.equal(h.elements['#window-switch'].hidden, false, 'el switch espera el fin real del cierre');
+  assert.match(h.elements['#providers'].innerHTML, /32<span>%/);
+  h.call('render()');
+  assert.equal(h.elements['#window-switch'].hidden, false, 'un refresco durante el cierre conserva el switch');
+  assert.match(h.elements['#providers'].innerHTML, /32<span>%/);
+  h.finishMotion();
   await closing;
   assert.equal(h.elements['#window-switch'].hidden, true);
   assert.match(h.elements['#providers'].innerHTML, /12<span>%/);
@@ -73,6 +80,63 @@ test('el switch cambia todos los proveedores y la cápsula conserva sesión al c
   assert.equal(h.elements['#window-switch'].hidden, false);
   const restarted = await settingsHarness();
   assert.equal(restarted.elements['#session'].attributes['aria-pressed'], 'true');
+});
+
+test('reabrir durante el cierre conserva la ventana semanal elegida', async () => {
+  const h = await settingsHarness();
+  h.call("selectedWindow = 'weekly'; latest.limits = { claude: { weekly: { value: { usedPercent: 32 } } } }; render()");
+  h.holdMotion();
+  const closing = h.call('setExpanded(false)');
+  await flush();
+  const opening = h.call('setExpanded(true)');
+  await flush();
+  h.finishMotion();
+  await Promise.all([closing, opening]);
+  assert.equal(h.elements['#window-switch'].hidden, false);
+  assert.match(h.elements['#providers'].innerHTML, /32<span>%/);
+  assert.equal(h.elements['.widget'].classes.has('expanded'), true);
+});
+
+test('cerrar con ajustes abiertos conserva el semanal durante la espera del menú', async () => {
+  const h = await settingsHarness();
+  h.call("selectedWindow = 'weekly'; latest.limits = { claude: { weekly: { value: { usedPercent: 32 } } } }; render()");
+  await h.call('openSettings()');
+  const closing = h.call('setExpanded(false)');
+  await h.clock.advance(50);
+  h.call('render()');
+  assert.equal(h.elements['#window-switch'].hidden, false);
+  assert.match(h.elements['#providers'].innerHTML, /32<span>%/);
+  await h.clock.advance(1000);
+  await closing;
+  assert.equal(h.elements['#window-switch'].hidden, true);
+});
+
+test('solo el semanal de Claude en cero conserva su cuenta atrás y reinicio futuro', async () => {
+  const h = await settingsHarness();
+  h.call(`const zero = { value: { usedPercent: 0, resetsAt: Date.now() + 51 * 3600000 } };
+    latest.limits = { claude: { session: zero, weekly: zero }, codex: { session: zero, weekly: zero } }`);
+  for (const period of ['session', 'weekly']) {
+    h.call(`selectedWindow = '${period}'; render()`);
+    const cells = h.elements['#providers'].innerHTML.match(/<article[\s\S]*?<\/article>/g);
+    for (const [index, key] of ['claude', 'codex'].entries()) {
+      if (period === 'weekly' && key === 'claude') {
+        assert.match(cells[index], /Reinicia en/);
+        assert.match(cells[index], /2 d 3 h/);
+        assert.match(cells[index], /class="reset">Reset /);
+        assert.doesNotMatch(cells[index], /DISPONIBLE|Inicia al usarla/);
+      } else {
+        assert.match(cells[index], /DISPONIBLE/);
+        assert.match(cells[index], /Inicia al usarla/);
+        assert.match(cells[index], /class="reset"><\/div>/);
+      }
+    }
+  }
+});
+
+test('el reinicio semanal lleva Reset antes del día y la hora', async () => {
+  const h = await settingsHarness();
+  const markup = h.call("cell('Claude', 'claude', { value: { usedPercent: 32, resetsAt: Date.now() + 51 * 3600000 } }, 'weekly')");
+  assert.match(markup, /class="reset">Reset (dom|lun|mar|mié|jue|vie|sáb) \d{1,2}:\d{2}(am|pm)<\/div>/);
 });
 
 for (const close of ['closeSettings()', 'setExpanded(false)']) {
@@ -210,7 +274,7 @@ test('renderer refresh, minute tick, failure and opt-in use the minimal surface'
   const attributes = {};
   const classes = new Set();
   const toggle = { addEventListener: (name, fn) => { toggleListeners[name] = fn; }, setAttribute: (name, value) => { attributes[name] = value; }, setPointerCapture() {}, releasePointerCapture() {} };
-  const widget = { dataset: {}, classList: { toggle: (name, enabled) => enabled ? classes.add(name) : classes.delete(name), add: name => classes.add(name), remove: name => classes.delete(name) } };
+  const widget = { dataset: {}, classList: { contains: name => classes.has(name), toggle: (name, enabled) => enabled ? classes.add(name) : classes.delete(name), add: name => classes.add(name), remove: name => classes.delete(name) } };
   const footerClasses = new Set();
   const footer = { innerHTML: '', classList: { toggle: (name, enabled) => enabled ? footerClasses.add(name) : footerClasses.delete(name) } };
   const footerStatus = { innerHTML: '', setAttribute() {}, classList: { toggle() {} } };

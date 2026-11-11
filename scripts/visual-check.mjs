@@ -268,7 +268,7 @@ async function checkWindowSwitch(win) {
   })`);
   assert.deepEqual([state.session, state.weekly], ['false', 'true']);
   assert.equal(state.color, 'rgb(255, 255, 255)');
-  assert.ok(state.resets.every(text => /^(dom|lun|mar|mié|jue|vie|sáb) 12:58am$/.test(text)));
+  assert.deepEqual(state.resets, ['Reset mié 12:58am', 'Reset mié 12:58am']);
   assert.equal(state.stored, 0, 'la selección de ventana vive solo en memoria');
   win.webContents.debugger.attach('1.3');
   const { nodes } = await win.webContents.debugger.sendCommand('Accessibility.getFullAXTree');
@@ -310,7 +310,8 @@ app.whenReady().then(async () => {
     await session.defaultSession.clearStorageData({ storages: ['localstorage'] });
     const entry = usedPercent => ({ value: { usedPercent, resetsAt: Date.now() + 600000 }, fetchedAt: Date.now() });
     const weeklyReset = new Date();
-    weeklyReset.setDate(weeklyReset.getDate() + 3);
+    const daysUntilWednesday = (3 - weeklyReset.getDay() + 7) % 7 || 7;
+    weeklyReset.setDate(weeklyReset.getDate() + daysUntilWednesday);
     weeklyReset.setHours(0, 58, 0, 0);
     const weekly = { value: { usedPercent: 32, resetsAt: weeklyReset.getTime() }, fetchedAt: Date.now() };
     const cases = [
