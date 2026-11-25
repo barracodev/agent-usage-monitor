@@ -29,6 +29,11 @@ test('countdown follows reset time, rounds up minutes and never goes negative', 
   assert.equal(formatCountdown(now + 1, now), '0 h 1 m');
   assert.equal(formatCountdown(now - 1, now), '0 h 0 m');
   assert.equal(formatCountdown(null, now), '—');
+  assert.equal(formatCountdown(now + 24 * 3600000, now), '24 h 0 m');
+  assert.equal(formatCountdown(now + 24 * 3600000 + 1, now), '24 h 1 m');
+  assert.equal(formatCountdown(now + 24 * 3600000, now, true), '24 h 0 m');
+  assert.equal(formatCountdown(now + 24 * 3600000 + 1, now, true), '1 d 1 h');
+  assert.equal(formatCountdown(now + 51 * 3600000, now, true), '2 d 3 h');
 });
 
 test('a reset solo existe mientras hay consumo y la ventana sigue activa', () => {
@@ -37,4 +42,16 @@ test('a reset solo existe mientras hay consumo y la ventana sigue activa', () =>
   assert.equal(activeResetAt({ value: { usedPercent: 0, resetsAt: now + 60000 } }, now), null);
   assert.equal(activeResetAt({ value: { usedPercent: 12, resetsAt: now - 1 } }, now), null);
   assert.equal(activeResetAt({ value: { usedPercent: 12, resetsAt: null } }, now), null);
+});
+
+test('una ventana fija admite cero solo con una lectura válida y un reset futuro', () => {
+  const now = 1800000000000;
+  const entry = { value: { usedPercent: 0, resetsAt: now + 60000 } };
+  assert.equal(activeResetAt(entry, now, true), now + 60000);
+  for (const usedPercent of [null, undefined, NaN, -1]) {
+    assert.equal(activeResetAt({ value: { ...entry.value, usedPercent } }, now, true), null);
+  }
+  for (const resetsAt of [null, undefined, NaN, now, now - 1]) {
+    assert.equal(activeResetAt({ value: { ...entry.value, resetsAt } }, now, true), null);
+  }
 });

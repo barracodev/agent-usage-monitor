@@ -26,7 +26,7 @@ ipcMain.handle('qa:layout', (event, layout) => {
   const adaptiveWidth = 56 + 20 + Math.max(1, count) * 154;
   const collapsedWidth = count ? 98 : 206;
   const width = layout.expanded ? (layout.selectorOpen ? Math.max(adaptiveWidth, 384) : adaptiveWidth) : collapsedWidth;
-  win.setBounds({ ...win.getBounds(), width, height: layout.expanded ? 256 : collapsedHeight });
+  win.setBounds({ ...win.getBounds(), width, height: layout.expanded ? 290 : collapsedHeight });
   return { placement: { horizontal: 'right', vertical: 'down' }, duration: 0, delay: 0 };
 });
 ipcMain.handle('qa:move', (event, x, y) => BrowserWindow.fromWebContents(event.sender).setPosition(Math.round(x), Math.round(y)));
@@ -60,6 +60,9 @@ const inspect = `(() => {
   };
 })()`;
 // capturePage sobre ventanas ocultas falla a veces con UnknownVizError del compositor.
+// Un redibujo cancela las animaciones de los nodos que reemplaza; también cuentan como terminadas.
+const settled = 'Promise.allSettled(document.getAnimations().map(animation => animation.finished)).then(() => true)';
+
 async function capture(win) {
   for (let attempt = 1; ; attempt++) {
     try { return await win.webContents.capturePage(); }
@@ -107,7 +110,7 @@ async function checkWindowTiming() {
     for (const expanded of [true, false]) {
       frames.length = 0;
       await win.webContents.executeJavaScript(`document.querySelector('#toggle').click()`);
-      const duration = MOTION_MS.toggle;
+      const duration = expanded ? MOTION_MS.open : MOTION_MS.close;
       await waitForPanel(win, expanded);
       await vm.runInContext('boundsMotion', context);
       const first = frames[0];
@@ -232,6 +235,74 @@ async function checkEmptyContrast(win) {
   }
   await win.webContents.executeJavaScript(`document.querySelector('.widget').classList.remove('glass')`);
 }
+async function checkWindowSwitch(win) {
+  const before = await win.webContents.executeJavaScript(inspect);
+  const bounds = win.getBounds();
+  const point = await win.webContents.executeJavaScript(`(() => {
+    window.qaWindowButton = document.querySelector('[data-window="weekly"]');
+    window.qaWindowButton.focus();
+    const rect = window.qaWindowButton.getBoundingClientRect();
+    return { x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2) };
+  })()`);
+  win.webContents.sendInputEvent({ type: 'mouseDown', ...point, button: 'left', clickCount: 1 });
+  win.webContents.send('qa:update', fixture);
+  win.webContents.send('qa:glass', { claude: false, codex: false, footer: false, window: true });
+  assert.equal(await win.webContents.executeJavaScript('document.activeElement === window.qaWindowButton && window.qaWindowButton.isConnected'), true);
+  win.webContents.sendInputEvent({ type: 'mouseUp', ...point, button: 'left', clickCount: 1 });
+  await win.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(resolve))');
+  // Los valores entran desplazados; el ajuste se mide cuando ya llegaron.
+  await win.webContents.executeJavaScript(settled);
+  const weekly = await win.webContents.executeJavaScript(inspect);
+  assert.equal(weekly.expanded, 'true', 'el switch no debe plegar el panel');
+  assert.deepEqual(win.getBounds(), bounds, 'el switch no debe iniciar un arrastre');
+  assert.deepEqual(weekly.details, ['32%', '32%']);
+  win.webContents.sendInputEvent({ type: 'mouseDown', ...point, button: 'left', clickCount: 1 });
+  win.webContents.sendInputEvent({ type: 'mouseMove', x: point.x + 6, y: point.y, movementX: 6, movementY: 0, modifiers: ['leftButtonDown'] });
+  win.webContents.sendInputEvent({ type: 'mouseUp', x: point.x + 6, y: point.y, button: 'left', clickCount: 1 });
+  await win.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(resolve))');
+  assert.deepEqual(win.getBounds(), bounds, 'mover el puntero sobre el switch no arrastra la ventana');
+  assert.equal((await win.webContents.executeJavaScript(inspect)).expanded, 'true');
+  assert.deepEqual(weekly.cells.map(cell => cell.bounds), before.cells.map(cell => cell.bounds), 'las columnas conservan su tamaño');
+  assert.ok(weekly.cells.every(cell => !cell.overflow), 'el día y la hora deben caber en ambas columnas');
+  const state = await win.webContents.executeJavaScript(`({
+    session: document.querySelector('[data-window="session"]').getAttribute('aria-pressed'),
+    weekly: window.qaWindowButton.getAttribute('aria-pressed'),
+    color: getComputedStyle(window.qaWindowButton).color,
+    resets: [...document.querySelectorAll('.reset')].map(element => element.textContent),
+    stored: localStorage.length,
+  })`);
+  assert.deepEqual([state.session, state.weekly], ['false', 'true']);
+  assert.equal(state.color, 'rgb(255, 255, 255)');
+  assert.deepEqual(state.resets, ['Reset mié 12:58am', 'Reset mié 12:58am']);
+  assert.equal(state.stored, 0, 'la selección de ventana vive solo en memoria');
+  win.webContents.debugger.attach('1.3');
+  const { nodes } = await win.webContents.debugger.sendCommand('Accessibility.getFullAXTree');
+  win.webContents.debugger.detach();
+  const controls = nodes.filter(node => !node.ignored && node.role?.value === 'button' && ['Sesión', 'Semanal'].includes(node.name?.value));
+  assert.deepEqual(controls.map(node => [node.name.value, node.properties.find(property => property.name === 'pressed')?.value.value]), [['Sesión', 'false'], ['Semanal', 'true']]);
+  await win.webContents.executeJavaScript(`document.querySelector('#toggle').click()`);
+  await waitForPanel(win, false);
+  assert.deepEqual((await win.webContents.executeJavaScript(inspect)).text, before.text, 'la cápsula siempre muestra sesión');
+  await win.webContents.executeJavaScript(`document.querySelector('#toggle').click()`);
+  await waitForPanel(win, true);
+  assert.deepEqual((await win.webContents.executeJavaScript(inspect)).details, weekly.details);
+  await win.webContents.executeJavaScript(`document.querySelector('[data-window="session"]').focus()`);
+  win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' });
+  win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+  await win.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(resolve))');
+  assert.deepEqual((await win.webContents.executeJavaScript(inspect)).details, before.details);
+  win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Tab' });
+  win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Tab' });
+  await win.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(resolve))');
+  assert.equal(await win.webContents.executeJavaScript('document.activeElement === window.qaWindowButton'), true, 'Tab debe enfocar Semanal');
+  win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' });
+  win.webContents.sendInputEvent({ type: 'char', keyCode: '\r' });
+  win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' });
+  await win.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(resolve))');
+  assert.deepEqual((await win.webContents.executeJavaScript(inspect)).details, weekly.details);
+  await win.webContents.executeJavaScript(`document.querySelector('[data-window="session"]').click(); document.querySelector('.widget').classList.remove('glass')`);
+  console.log('switch: clic, arrastre, foco, teclado, accesibilidad y cápsula OK');
+}
 app.whenReady().then(async () => {
   let win;
   try {
@@ -243,6 +314,11 @@ app.whenReady().then(async () => {
     await checkWindowPersistence();
     await session.defaultSession.clearStorageData({ storages: ['localstorage'] });
     const entry = usedPercent => ({ value: { usedPercent, resetsAt: Date.now() + 600000 }, fetchedAt: Date.now() });
+    const weeklyReset = new Date();
+    const daysUntilWednesday = (3 - weeklyReset.getDay() + 7) % 7 || 7;
+    weeklyReset.setDate(weeklyReset.getDate() + daysUntilWednesday);
+    weeklyReset.setHours(0, 58, 0, 0);
+    const weekly = { value: { usedPercent: 32, resetsAt: weeklyReset.getTime() }, fetchedAt: Date.now() };
     const cases = [
       ['normal', entry(42), entry(27)],
       ['aviso', entry(80), entry(94)],
@@ -253,7 +329,7 @@ app.whenReady().then(async () => {
     ];
     await mkdir(path.join(root, 'artifacts/wireframe'), { recursive: true });
     for (const [name, claude, codex] of cases) {
-      fixture = { limits: { claude, codex }, providers: [{ key: 'claude', name: 'Claude', installed: true }, { key: 'codex', name: 'Codex', installed: true }] };
+      fixture = { limits: { claude: { session: claude, weekly }, codex: { session: codex, weekly } }, providers: [{ key: 'claude', name: 'Claude', installed: true }, { key: 'codex', name: 'Codex', installed: true }] };
       win = new BrowserWindow({ width: 98, height: 194, frame: false, transparent: true, resizable: false, show: false, webPreferences: { preload: path.join(root, 'scripts/visual-preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: false } });
       const errors = [];
       win.webContents.on('console-message', details => { if (details.level === 'error') errors.push(details.message); });
@@ -287,8 +363,10 @@ app.whenReady().then(async () => {
       await waitForPanel(win, true);
       const detail = await win.webContents.executeJavaScript(inspect);
       assert.equal(detail.expanded, 'true');
-      assert.deepEqual(win.getContentSize(), [384, 256]);
-      assert.deepEqual([detail.widget.width, detail.widget.height], [328, 200]);
+      const [detailWidth, detailHeight] = win.getContentSize();
+      // La altura nueva cae entre píxeles físicos con escala de 125 %.
+      assert.ok(detailWidth === 384 && detailHeight >= 290 && detailHeight <= 291);
+      assert.deepEqual([detail.widget.width, detail.widget.height], [328, 234]);
       assert.deepEqual(detail.details, [claude, codex].map(source => Number.isFinite(source.value?.usedPercent) ? `${Math.floor(source.value.usedPercent)}%` : '?'));
       assert.deepEqual(detail.bars, [claude, codex].map(source => `${source.value?.usedPercent || 0}%`));
       assert.ok(detail.cells[0].bounds.right < detail.cells[1].bounds.left);
@@ -298,6 +376,7 @@ app.whenReady().then(async () => {
       assert.deepEqual(errors, []);
       await writeFile(path.join(root, `artifacts/wireframe/${name}-detalle.png`), (await capture(win)).toPNG());
       if (name === 'normal') {
+        await checkWindowSwitch(win);
         await win.webContents.executeJavaScript("document.querySelector('#settings').click()");
         await new Promise(resolve => setTimeout(resolve, 100));
         const settings = await win.webContents.executeJavaScript(inspect);
@@ -337,9 +416,13 @@ app.whenReady().then(async () => {
         await win.webContents.executeJavaScript("document.querySelector('#settings').click()");
         await new Promise(resolve => setTimeout(resolve, 220));
         const [oneWidth, oneHeight] = win.getContentSize();
-        assert.ok(oneWidth >= 230 && oneWidth <= 231 && oneHeight === 256, 'one provider must narrow the expanded window');
+        assert.ok(oneWidth >= 230 && oneWidth <= 231 && oneHeight >= 290 && oneHeight <= 291, 'one provider must narrow the expanded window');
         const oneDetail = await win.webContents.executeJavaScript(inspect);
-        assert.deepEqual([oneDetail.widget.width, oneDetail.widget.height], [174, 200]);
+        assert.deepEqual([oneDetail.widget.width, oneDetail.widget.height], [174, 234]);
+        await win.webContents.executeJavaScript(`document.querySelector('[data-window="weekly"]').click()`);
+        await win.webContents.executeJavaScript(settled);
+        assert.ok((await win.webContents.executeJavaScript(inspect)).cells.every(cell => !cell.overflow), 'el reinicio semanal también cabe con un proveedor');
+        await win.webContents.executeJavaScript(`document.querySelector('[data-window="session"]').click()`);
         await win.webContents.executeJavaScript("document.querySelector('#toggle').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))");
         await waitForPanel(win, false);
         const [compactWidth, compactHeight] = win.getContentSize();
@@ -351,7 +434,7 @@ app.whenReady().then(async () => {
         await win.webContents.executeJavaScript("document.querySelector('[data-action=\"toggle-provider\"][data-provider=\"codex\"]').click()");
         await win.webContents.executeJavaScript("document.querySelector('#settings').click()");
         await new Promise(resolve => setTimeout(resolve, 180));
-        assert.deepEqual(win.getContentSize(), [384, 256]);
+        assert.ok(win.getContentSize()[0] === 384 && win.getContentSize()[1] >= 290 && win.getContentSize()[1] <= 291);
       }
       await win.webContents.executeJavaScript("document.querySelector('#toggle').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))");
       await waitForPanel(win, false);

@@ -17,7 +17,8 @@ const EMPTY_WIDGET_WIDTH = 150;
 const COLLAPSED_FRAME_HEIGHT = 16;
 const PROVIDER_HEIGHT = 50;
 const PROVIDER_GAP = 22;
-const EXPANDED_WIDGET_HEIGHT = 200;
+const WINDOW_SWITCH_HEIGHT = 34;
+const EXPANDED_WIDGET_HEIGHT = 200 + WINDOW_SWITCH_HEIGHT;
 const EXPANDED_COLUMN_WIDTH = 154;
 const EXPANDED_BASE_WIDTH = 20;
 const SELECTOR_WIDGET_WIDTH = 328;
@@ -51,7 +52,7 @@ let positioningHost = false;
 let glassMorph = 0;
 let glassPanel;
 let glassScale;
-let glassLightText = { claude: false, codex: false, footer: false };
+let glassLightText = { claude: false, codex: false, footer: false, window: false };
 let glassBandKeys = [];
 let glassCapturePolicy = 'all';
 let glassHidden = false;
@@ -115,7 +116,7 @@ function hostBounds(capsule) {
   const width = Math.max(capsule.width, Math.min(778, area.width));
   const height = Math.max(capsule.height, Math.min(462, area.height));
   const x = Math.max(area.x, Math.min(capsule.x - 286, area.x + area.width - width));
-  const y = Math.max(area.y, Math.min(capsule.y - 134, area.y + area.height - height));
+  const y = Math.max(area.y, Math.min(capsule.y - (EXPANDED_WIDGET_HEIGHT - 66), area.y + area.height - height));
   return { x: Math.min(capsule.x, Math.max(capsule.x + capsule.width - width, x)), y: Math.min(capsule.y, Math.max(capsule.y + capsule.height - height, y)), width, height };
 }
 function surfaceEdges(bounds, origin) {
@@ -129,19 +130,19 @@ function cancelMotion() {
   activeMotion?.resolve();
   activeMotion = null;
 }
-function describeMotion(from, to, duration) {
+function describeMotion(from, to, duration, spring = false) {
   const host = mainWindow.getContentBounds();
   const origin = screen.dipToScreenPoint({ x: host.x, y: host.y });
   const scale = screen.getDisplayMatching(to).scaleFactor;
   const start = surfacePixels && surfaceScale === scale ? { x: surfacePixels.x, y: surfacePixels.y, right: surfacePixels.x + surfacePixels.width, bottom: surfacePixels.y + surfacePixels.height } : surfaceEdges(from, origin);
-  return { id: boundsAnimation, from: start, to: surfaceEdges(to, origin), scale, duration, radius: panelLayout.expanded ? 22 : 21 };
+  return { id: boundsAnimation, from: start, to: surfaceEdges(to, origin), scale, duration, spring, radius: panelLayout.expanded ? 22 : 21 };
 }
-function animateBounds(from, to, duration) {
+function animateBounds(from, to, duration, spring = false) {
   cancelMotion();
   ++boundsAnimation;
   const host = mainWindow.getContentBounds();
   const origin = screen.dipToScreenPoint({ x: host.x, y: host.y });
-  const motion = describeMotion(from, to, duration);
+  const motion = describeMotion(from, to, duration, spring);
   surfacePixels = motionRect(motion, duration ? 0 : 1);
   surfaceScale = motion.scale;
   surfaceBounds = duration ? from : to;
@@ -240,21 +241,23 @@ function syncGlass() {
   const target = layoutTarget || bounds;
   const bandRect = { width: Math.round((target.width - 56) * scaleFactor), height: Math.round((target.height - 56) * scaleFactor) };
   if (panelLayout.expanded) {
+    const headerY = Math.min(bandRect.height, Math.round(WINDOW_SWITCH_HEIGHT * scaleFactor));
+    const headerBand = { x: 0, y: 0, width: bandRect.width, height: headerY };
     if (!panelLayout.providers.length) {
-      glassBandKeys = ['footer'];
-      glassPanel.setLumaBands([{ id: 0, x: 0, y: 0, ...bandRect }]);
+      glassBandKeys = ['footer', 'window'];
+      glassPanel.setLumaBands([{ id: 0, x: 0, y: headerY, width: bandRect.width, height: bandRect.height - headerY }, { id: 1, ...headerBand }]);
       if (mainWindow.isVisible()) glassPanel.show(0);
       return;
     }
-    const footerY = Math.min(bandRect.height, Math.round(158 * scaleFactor));
+    const footerY = Math.min(bandRect.height, Math.round((158 + WINDOW_SWITCH_HEIGHT) * scaleFactor));
     const columns = panelLayout.providers.length;
-    glassBandKeys = [...panelLayout.providers, 'footer'];
+    glassBandKeys = [...panelLayout.providers, 'footer', 'window'];
     const providerBands = panelLayout.providers.map((key, id) => {
       const x = Math.round(id * bandRect.width / columns);
       const right = Math.round((id + 1) * bandRect.width / columns);
-      return { id, x, y: 0, width: right - x, height: footerY };
+      return { id, x, y: headerY, width: right - x, height: footerY - headerY };
     });
-    glassPanel.setLumaBands([...providerBands, { id: providerBands.length, x: 0, y: footerY, width: bandRect.width, height: bandRect.height - footerY }]);
+    glassPanel.setLumaBands([...providerBands, { id: columns, x: 0, y: footerY, width: bandRect.width, height: bandRect.height - footerY }, { id: columns + 1, ...headerBand }]);
   } else {
     const keys = panelLayout.providers.length ? panelLayout.providers : ['footer'];
     glassBandKeys = keys;
@@ -332,7 +335,13 @@ async function update(key, read) {
 async function dashboard(force = false) {
   if (force) await readClaude();
   const now = Date.now();
-  return { limits: { claude: projectClaude(limitsCache.claude, now), codex: projectCodex(limitsCache.codex, now) }, providers: detectedProviders() };
+  const limits = {};
+  for (const [key, entry] of Object.entries(limitsCache)) {
+    const project = key === 'claude' ? projectClaude : projectCodex;
+    limits[key] = {};
+    for (const period of ['session', 'weekly']) limits[key][period] = project({ ...entry, value: entry.value?.[period] ?? null }, now);
+  }
+  return { limits, providers: detectedProviders() };
 }
 // fetchedAt cambia en cada lectura; sin él, la firma solo cambia cuando cambia lo que se ve.
 const signature = data => JSON.stringify(data, (key, value) => key === 'fetchedAt' ? undefined : value);
@@ -422,7 +431,9 @@ function applyLayout(layout) {
   placed.x = Math.max(area.x, Math.min(placed.x, area.x + area.width - size.width));
   placed.y = Math.max(area.y, Math.min(placed.y, area.y + area.height - size.height));
   const directionChanged = panelLayout.expanded !== next.expanded;
-  const duration = initialPosition || layout.reduceMotion ? 0 : directionChanged ? MOTION_MS.toggle : MOTION_MS.resize;
+  // Solo abrir rebota: al cerrar, pasarse dejaría la superficie más chica que la cápsula.
+  const opening = directionChanged && next.expanded;
+  const duration = initialPosition || layout.reduceMotion ? 0 : opening ? MOTION_MS.open : directionChanged ? MOTION_MS.close : MOTION_MS.resize;
   panelLayout = next;
   initialPosition = null;
   layoutTarget = placed;
@@ -432,7 +443,7 @@ function applyLayout(layout) {
     surfaceWindowOrigin = mainWindow.getBounds();
     hostReady = true;
   }
-  const motion = animateBounds(bounds, placed, duration);
+  const motion = animateBounds(bounds, placed, duration, opening);
   if (!duration) layoutTarget = null;
   return { placement: layoutPlacement, duration, delay: 0, motion };
 }

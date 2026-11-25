@@ -24,13 +24,16 @@ function normalize(provider, value, fetchedAt) {
 
 export function normalizeClaudeUsage(rateLimits, fetchedAt = Date.now()) {
   const source = rateLimits?.rate_limits || rateLimits?.rateLimits || rateLimits || {};
-  return normalize('claude', source.five_hour ?? source.session ?? source.primary, fetchedAt);
+  const session = normalize('claude', source.five_hour, fetchedAt);
+  const weekly = normalize('claude', source.seven_day, fetchedAt);
+  return session || weekly ? { session, weekly, fetchedAt } : null;
 }
 
 export function normalizeCodexUsage(data, fetchedAt = Date.now()) {
-  const primary = (data?.rateLimits || data?.rate_limits || {}).primary;
-  if (Number(primary?.windowDurationMins) !== 300) return null;
-  return normalize('codex', primary, fetchedAt);
+  const { primary, secondary } = data?.rateLimits || data?.rate_limits || {};
+  const session = Number(primary?.windowDurationMins) === 300 ? normalize('codex', primary, fetchedAt) : null;
+  const weekly = Number(secondary?.windowDurationMins) === 10080 ? normalize('codex', secondary, fetchedAt) : null;
+  return session || weekly ? { session, weekly, fetchedAt } : null;
 }
 
 export function isStale(fetchedAt, maxAgeMs, now = Date.now()) {
@@ -51,10 +54,11 @@ export function projectCodex(entry, now = Date.now()) {
   return { ...entry, fetchedAt: entry.fetchedAt || null, stale: Boolean(value) && (Boolean(entry.error) || isStale(entry.fetchedAt, CODEX_STALE_MS, now)) };
 }
 
-export function formatReset(resetAt) {
+export function formatReset(resetAt, includeDay = false) {
   const stamp = Number(resetAt);
   if (!Number.isFinite(stamp) || stamp <= 0) return '—';
   // A mano y no con toLocaleTimeString: «p. m.» no cabe en la celda; «12:58am» llena sus 81 px.
   const date = new Date(stamp);
-  return `${date.getHours() % 12 || 12}:${String(date.getMinutes()).padStart(2, '0')}${date.getHours() < 12 ? 'am' : 'pm'}`;
+  const day = includeDay ? `${['dom', 'lun', 'mar', 'mié', 'jue', 'vie', 'sáb'][date.getDay()]} ` : '';
+  return `${day}${date.getHours() % 12 || 12}:${String(date.getMinutes()).padStart(2, '0')}${date.getHours() < 12 ? 'am' : 'pm'}`;
 }

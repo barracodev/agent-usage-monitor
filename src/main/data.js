@@ -70,7 +70,7 @@ export function createClaudeClient(options = {}) {
     // shortcut: get_usage es experimental; adaptar si Claude Code cambia su protocolo.
     const data = await request(current, { subtype: 'get_usage', skip_behaviors: true });
     const limits = data?.rate_limits_available === false ? null : normalizeClaudeUsage(data?.rate_limits);
-    if (!limits) throw new Error('Claude no entregó una ventana de 5 horas válida');
+    if (!limits) throw new Error('Claude no entregó ninguna ventana de uso válida');
     return limits;
   }
 
@@ -80,12 +80,12 @@ export function createClaudeClient(options = {}) {
 function codexLimitsFrom(message) {
   if (message.error) throw new Error(message.error.message || 'Codex app-server falló');
   const limits = normalizeCodexUsage(message.result || {});
-  if (!limits) throw new Error('Codex no devolvió la ventana primaria de 5 horas');
+  if (!limits) throw new Error('Codex no devolvió ninguna ventana de uso válida');
   return limits;
 }
 
 /**
- * Mantiene vivo un `codex app-server` para leer la ventana de cinco horas sin lanzar procesos
+ * Mantiene vivo un `codex app-server` para leer las ventanas de uso sin lanzar procesos
  * en cada consulta. Si el proceso muere o no responde, se rechaza lo pendiente y la siguiente
  * lectura lo relanza; un error de la propia lectura no lo reinicia.
  */
