@@ -130,19 +130,19 @@ function cancelMotion() {
   activeMotion?.resolve();
   activeMotion = null;
 }
-function describeMotion(from, to, duration) {
+function describeMotion(from, to, duration, spring = false) {
   const host = mainWindow.getContentBounds();
   const origin = screen.dipToScreenPoint({ x: host.x, y: host.y });
   const scale = screen.getDisplayMatching(to).scaleFactor;
   const start = surfacePixels && surfaceScale === scale ? { x: surfacePixels.x, y: surfacePixels.y, right: surfacePixels.x + surfacePixels.width, bottom: surfacePixels.y + surfacePixels.height } : surfaceEdges(from, origin);
-  return { id: boundsAnimation, from: start, to: surfaceEdges(to, origin), scale, duration, radius: panelLayout.expanded ? 22 : 21 };
+  return { id: boundsAnimation, from: start, to: surfaceEdges(to, origin), scale, duration, spring, radius: panelLayout.expanded ? 22 : 21 };
 }
-function animateBounds(from, to, duration) {
+function animateBounds(from, to, duration, spring = false) {
   cancelMotion();
   ++boundsAnimation;
   const host = mainWindow.getContentBounds();
   const origin = screen.dipToScreenPoint({ x: host.x, y: host.y });
-  const motion = describeMotion(from, to, duration);
+  const motion = describeMotion(from, to, duration, spring);
   surfacePixels = motionRect(motion, duration ? 0 : 1);
   surfaceScale = motion.scale;
   surfaceBounds = duration ? from : to;
@@ -431,7 +431,9 @@ function applyLayout(layout) {
   placed.x = Math.max(area.x, Math.min(placed.x, area.x + area.width - size.width));
   placed.y = Math.max(area.y, Math.min(placed.y, area.y + area.height - size.height));
   const directionChanged = panelLayout.expanded !== next.expanded;
-  const duration = initialPosition || layout.reduceMotion ? 0 : directionChanged ? MOTION_MS.toggle : MOTION_MS.resize;
+  // Solo abrir rebota: al cerrar, pasarse dejaría la superficie más chica que la cápsula.
+  const opening = directionChanged && next.expanded;
+  const duration = initialPosition || layout.reduceMotion ? 0 : opening ? MOTION_MS.open : directionChanged ? MOTION_MS.close : MOTION_MS.resize;
   panelLayout = next;
   initialPosition = null;
   layoutTarget = placed;
@@ -441,7 +443,7 @@ function applyLayout(layout) {
     surfaceWindowOrigin = mainWindow.getBounds();
     hostReady = true;
   }
-  const motion = animateBounds(bounds, placed, duration);
+  const motion = animateBounds(bounds, placed, duration, opening);
   if (!duration) layoutTarget = null;
   return { placement: layoutPlacement, duration, delay: 0, motion };
 }

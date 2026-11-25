@@ -60,6 +60,9 @@ const inspect = `(() => {
   };
 })()`;
 // capturePage sobre ventanas ocultas falla a veces con UnknownVizError del compositor.
+// Un redibujo cancela las animaciones de los nodos que reemplaza; también cuentan como terminadas.
+const settled = 'Promise.allSettled(document.getAnimations().map(animation => animation.finished)).then(() => true)';
+
 async function capture(win) {
   for (let attempt = 1; ; attempt++) {
     try { return await win.webContents.capturePage(); }
@@ -107,7 +110,7 @@ async function checkWindowTiming() {
     for (const expanded of [true, false]) {
       frames.length = 0;
       await win.webContents.executeJavaScript(`document.querySelector('#toggle').click()`);
-      const duration = MOTION_MS.toggle;
+      const duration = expanded ? MOTION_MS.open : MOTION_MS.close;
       await waitForPanel(win, expanded);
       await vm.runInContext('boundsMotion', context);
       const first = frames[0];
@@ -247,6 +250,8 @@ async function checkWindowSwitch(win) {
   assert.equal(await win.webContents.executeJavaScript('document.activeElement === window.qaWindowButton && window.qaWindowButton.isConnected'), true);
   win.webContents.sendInputEvent({ type: 'mouseUp', ...point, button: 'left', clickCount: 1 });
   await win.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(resolve))');
+  // Los valores entran desplazados; el ajuste se mide cuando ya llegaron.
+  await win.webContents.executeJavaScript(settled);
   const weekly = await win.webContents.executeJavaScript(inspect);
   assert.equal(weekly.expanded, 'true', 'el switch no debe plegar el panel');
   assert.deepEqual(win.getBounds(), bounds, 'el switch no debe iniciar un arrastre');
@@ -415,6 +420,7 @@ app.whenReady().then(async () => {
         const oneDetail = await win.webContents.executeJavaScript(inspect);
         assert.deepEqual([oneDetail.widget.width, oneDetail.widget.height], [174, 234]);
         await win.webContents.executeJavaScript(`document.querySelector('[data-window="weekly"]').click()`);
+        await win.webContents.executeJavaScript(settled);
         assert.ok((await win.webContents.executeJavaScript(inspect)).cells.every(cell => !cell.overflow), 'el reinicio semanal también cabe con un proveedor');
         await win.webContents.executeJavaScript(`document.querySelector('[data-window="session"]').click()`);
         await win.webContents.executeJavaScript("document.querySelector('#toggle').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))");

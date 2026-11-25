@@ -10,19 +10,21 @@
 <body>
   <main class="widget" aria-label="Uso de asistentes de IA">
     <button id="toggle" class="toggle" aria-label="Mostrar detalle de uso" aria-expanded="false" aria-controls="window-switch providers footer"></button>
-    <div id="window-switch" class="window-switch" role="group" aria-label="Ventana de uso" hidden>
-      <button type="button" data-window="session" aria-pressed="true">Sesión</button>
-      <button type="button" data-window="weekly" aria-pressed="false">Semanal</button>
+    <div class="content">
+      <div id="window-switch" class="window-switch" role="group" aria-label="Ventana de uso" hidden>
+        <button type="button" data-window="session" aria-pressed="true">Sesión</button>
+        <button type="button" data-window="weekly" aria-pressed="false">Semanal</button>
+      </div>
+      <section id="providers" aria-live="polite"></section>
+      <section id="empty-state" class="empty-state" hidden>
+        <span id="empty-icon" aria-hidden="true"></span>
+        <span><strong>Sin IA visibles</strong><small>Abre ajustes</small></span>
+      </section>
+      <footer id="footer" class="footer">
+        <span id="footer-status"></span>
+        <button id="settings" class="settings" aria-label="Configurar proveedores" aria-expanded="false" aria-controls="settings-menu"></button>
+      </footer>
     </div>
-    <section id="providers" aria-live="polite"></section>
-    <section id="empty-state" class="empty-state" hidden>
-      <span id="empty-icon" aria-hidden="true"></span>
-      <span><strong>Sin IA visibles</strong><small>Abre ajustes</small></span>
-    </section>
-    <footer id="footer" class="footer">
-      <span id="footer-status"></span>
-      <button id="settings" class="settings" aria-label="Configurar proveedores" aria-expanded="false" aria-controls="settings-menu"></button>
-    </footer>
     <div id="settings-menu" class="settings-menu" role="group" aria-labelledby="settings-title" hidden>
       <h2 id="settings-title">Mostrar IA</h2>
       <div id="provider-settings"></div>

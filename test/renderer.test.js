@@ -11,9 +11,9 @@ async function settingsHarness() {
   const source = (await readFile(new URL('../src/renderer/app.js', import.meta.url), 'utf8')).replace(/^import .*;$/gm, '');
   const clock = createClock();
   const elements = {};
-  for (const selector of ['#providers', '.widget', '#toggle', '#window-switch', '#session', '#weekly', '#footer', '#footer-status', '#settings', '#settings-menu', '#provider-settings', '#empty-state', '#empty-icon']) {
+  for (const selector of ['#providers', '.widget', '.content', '#toggle', '#window-switch', '#session', '#weekly', '#footer', '#footer-status', '#settings', '#settings-menu', '#provider-settings', '#empty-state', '#empty-icon']) {
     const classes = new Set();
-    elements[selector] = { style: {}, dataset: {}, children: [], hidden: true, innerHTML: '', attributes: {}, listeners: {}, classes,
+    elements[selector] = { style: {}, dataset: {}, children: [], hidden: true, innerHTML: '', attributes: {}, listeners: {}, classes, clientLeft: 1, clientTop: 1, querySelector: () => null,
       classList: { contains: name => classes.has(name), add: name => classes.add(name), remove: name => classes.delete(name), toggle: (name, on) => on ? classes.add(name) : classes.delete(name) },
       setAttribute(name, value) { this.attributes[name] = value; }, addEventListener(name, fn) { this.listeners[name] = fn; }, contains: () => false,
     };
@@ -85,9 +85,9 @@ test('el switch cambia todos los proveedores y la cápsula conserva sesión al c
 test('la cápsula muestra el semanal agotado vigente de cada proveedor', async () => {
   const h = await settingsHarness();
   const providers = h.elements['#providers'];
-  const arcs = [{ style: {} }, { style: {} }];
+  const arcs = [{ style: {}, getBoundingClientRect() {} }, { style: {}, getBoundingClientRect() {} }];
   providers.children = ['claude', 'codex'].map((provider, index) => ({
-    dataset: { provider }, querySelector: selector => selector === '.fill' ? arcs[index] : { style: {} },
+    dataset: { provider }, querySelector: selector => selector === '.fill' ? arcs[index] : { style: {}, getBoundingClientRect() {} },
   }));
   const figures = () => [...providers.innerHTML.matchAll(/<div class="figure ">(\d+)<span>%/g)].map(match => match[1]);
   h.call(`latest.limits = {
@@ -117,6 +117,98 @@ test('la cápsula muestra el semanal agotado vigente de cada proveedor', async (
   assert.deepEqual(figures(), ['3', '27']);
   assert.deepEqual(arcs.map(arc => arc.style.strokeDasharray), ['3 100', '27 100']);
   assert.doesNotMatch(providers.innerHTML, /Sin cuota semanal/);
+});
+
+test('abrir y cerrar fijan el contenido en su rectángulo y lo cambian a mitad del movimiento', async () => {
+  const h = await settingsHarness();
+  const widget = h.elements['.widget'];
+  const content = h.elements['.content'];
+  const panel = { x: 28, y: 20, right: 356, bottom: 254 };
+  const capsule = { x: 314, y: 20, right: 356, bottom: 158 };
+  h.call(`window.usageMonitor.frame = () => {}; window.usageMonitor.layout = async () => ({ motion: pending });
+    latest.limits = { claude: { session: { value: { usedPercent: 12 } }, weekly: { value: { usedPercent: 32 } } } }; selectedWindow = 'weekly'`);
+  const toggle = async (expanded, from, to, id) => {
+    h.context.pending = { id, from, to, scale: 1, duration: 280, radius: 21 };
+    h.holdMotion();
+    const done = h.call(`setExpanded(${expanded})`);
+    await h.clock.advance(96);
+    assert.equal(widget.classes.has('expanded'), !expanded, 'antes del cambio sigue el contenido de origen');
+    assert.equal(content.style.width, `${from.right - from.x - 2}px`, 'el contenido no se reacomoda con la superficie');
+    assert.equal(content.style.left, `${from.x - Number.parseFloat(widget.style.left)}px`);
+    assert.ok(Number(content.style.opacity) < .1);
+    await h.clock.advance(16);
+    assert.equal(widget.classes.has('expanded'), expanded);
+    assert.equal(content.style.width, `${to.right - to.x - 2}px`, 'el contenido nuevo nace en su tamaño final');
+    assert.equal(content.style.left, `${to.x - Number.parseFloat(widget.style.left)}px`);
+    if (expanded) {
+      assert.equal(content.style.opacity, '1', 'al abrir, la cascada funde cada parte');
+      assert.equal(widget.classes.has('entering'), true);
+      assert.match(h.elements['#providers'].innerHTML, /class="provider [^"]* rise"/);
+      h.call('render()');
+      assert.doesNotMatch(h.elements['#providers'].innerHTML, / rise"/, 'un redibujo no repite la cascada');
+    } else assert.ok(Number(content.style.opacity) > 0 && Number(content.style.opacity) < .2);
+    await h.clock.advance(200);
+    assert.equal(content.style.width, '', 'al llegar vuelve a ocupar la superficie');
+    assert.equal(content.style.opacity, '');
+    h.finishMotion();
+    await done;
+    await h.clock.advance(400);
+    assert.equal(widget.classes.has('entering'), false);
+  };
+  await toggle(false, panel, capsule, 2);
+  assert.match(h.elements['#providers'].innerHTML, /12<span>%/);
+  assert.equal(h.elements['#window-switch'].hidden, true);
+  await toggle(true, capsule, panel, 3);
+  assert.match(h.elements['#providers'].innerHTML, /32<span>%/);
+  assert.equal(h.elements['#window-switch'].hidden, false);
+});
+
+test('el switch desliza su indicador, anima los valores y lleva la barra desde su altura anterior', async () => {
+  const h = await settingsHarness();
+  const providers = h.elements['#providers'];
+  const committed = [];
+  const bar = { style: {}, getBoundingClientRect() { committed.push(this.style.height); } };
+  providers.children = [{ dataset: { provider: 'claude' }, querySelector: selector => selector === '.bar-fill' ? bar : { style: {} } }];
+  h.call(`latest.limits = { claude: { session: { value: { usedPercent: 12 } }, weekly: { value: { usedPercent: 32 } } } }; render()`);
+  assert.equal(h.elements['#window-switch'].dataset.window, 'session');
+  h.elements['#weekly'].listeners.click({ stopPropagation() {} });
+  assert.equal(h.elements['#window-switch'].dataset.window, 'weekly');
+  assert.equal(providers.dataset.shift, 'forward');
+  assert.deepEqual(committed, ['12%']);
+  assert.equal(bar.style.height, '32%');
+  h.call('render()');
+  assert.deepEqual(committed, ['12%'], 'un refresco sin cambios no vuelve a animar la barra');
+  h.elements['#session'].listeners.click({ stopPropagation() {} });
+  assert.equal(providers.dataset.shift, 'back');
+  await h.clock.advance(400);
+  assert.equal(providers.dataset.shift, undefined);
+});
+
+test('la cápsula cuenta hasta el valor nuevo, lleva el arco desde el anterior y late al cruzar 80 %', async () => {
+  const h = await settingsHarness();
+  const providers = h.elements['#providers'];
+  const closing = h.call('setExpanded(false)');
+  await h.clock.advance(10);
+  await closing;
+  const committed = [];
+  const arc = { style: {}, getBoundingClientRect() { committed.push(this.style.strokeDasharray); } };
+  const figure = { innerHTML: '' };
+  providers.children = [{ dataset: { provider: 'claude' }, querySelector: selector => selector === '.fill' ? arc : { style: {} } }];
+  providers.querySelector = selector => selector === '[data-provider="claude"] .figure' ? figure : null;
+  h.call('latest.limits = { claude: { session: { value: { usedPercent: 70 } } } }; render()');
+  assert.doesNotMatch(providers.innerHTML, /crossed/);
+  h.call('latest.limits.claude.session.value.usedPercent = 85; render()');
+  assert.match(providers.innerHTML, /class="provider live warn crossed/);
+  assert.deepEqual(committed, ['70 100']);
+  assert.equal(arc.style.strokeDasharray, '85 100');
+  assert.equal(figure.innerHTML, '70<span>%</span>');
+  await h.clock.advance(200);
+  const middle = Number.parseInt(figure.innerHTML);
+  assert.ok(middle > 70 && middle < 85, String(middle));
+  await h.clock.advance(400);
+  assert.equal(figure.innerHTML, '85<span>%</span>');
+  h.call('render()');
+  assert.doesNotMatch(providers.innerHTML, /crossed/, 'solo late al cruzar el umbral');
 });
 
 test('reabrir durante el cierre conserva la ventana semanal elegida', async () => {
@@ -303,10 +395,10 @@ test('renderer refresh, minute tick, failure and opt-in use the minimal surface'
   const source = (await readFile(new URL('../src/renderer/app.js', import.meta.url), 'utf8')).replace(/^import .*;$/gm, '');
   const listeners = {};
   const intervals = [];
-  const fills = [{ style: {} }, { style: {} }];
-  const bars = [{ style: {} }, { style: {} }];
+  const fills = [{ style: {}, getBoundingClientRect() {} }, { style: {}, getBoundingClientRect() {} }];
+  const bars = [{ style: {}, getBoundingClientRect() {} }, { style: {}, getBoundingClientRect() {} }];
   const children = ['claude', 'codex'].map((key, index) => ({ dataset: { provider: key }, querySelector: selector => selector === '.fill' ? fills[index] : bars[index] }));
-  const providers = { innerHTML: '', children, dataset: {}, hidden: false, addEventListener: (name, fn) => { listeners[name] = fn; } };
+  const providers = { innerHTML: '', children, dataset: {}, hidden: false, querySelector: () => null, addEventListener: (name, fn) => { listeners[name] = fn; } };
   const toggleListeners = {};
   const attributes = {};
   const classes = new Set();
@@ -333,10 +425,10 @@ test('renderer refresh, minute tick, failure and opt-in use the minimal surface'
   let glass;
   let animationFrame;
   const context = vm.createContext({ formatReset, activeResetAt, formatAge, formatCountdown, meterTone, providerState, motionRect,
-    document: { querySelector: selector => ({ '#providers': providers, '#toggle': toggle, '#window-switch': { classList: { toggle() {} } }, '.widget': widget, '#footer': footer, '#footer-status': footerStatus, '#settings': settingsButton, '#settings-menu': settingsMenu, '#provider-settings': providerSettings, '#empty-state': emptyState, '#empty-icon': emptyIcon })[selector] || { addEventListener() {} }, querySelectorAll: () => [], addEventListener: (name, fn) => { settingsListeners[`document:${name}`] = fn; } },
+    document: { querySelector: selector => ({ '#providers': providers, '#toggle': toggle, '#window-switch': { dataset: {}, classList: { toggle() {} } }, '.widget': widget, '.content': { style: {} }, '#footer': footer, '#footer-status': footerStatus, '#settings': settingsButton, '#settings-menu': settingsMenu, '#provider-settings': providerSettings, '#empty-state': emptyState, '#empty-icon': emptyIcon })[selector] || { addEventListener() {} }, querySelectorAll: () => [], addEventListener: (name, fn) => { settingsListeners[`document:${name}`] = fn; } },
     localStorage: { getItem: key => stored[key] || null, setItem: (key, value) => { stored[key] = value; } },
     window: { screenX: 100, screenY: 200, matchMedia: () => ({ matches: false }), usageMonitor: { layout: value => { layouts.push(value); return Promise.resolve({ horizontal: 'right', vertical: 'down' }); }, waitForMotion: async () => {}, move: (x, y) => moves.push([x, y]), read: async () => { if (failed) throw Error(); return data; }, openInstall: async key => { installPages.push(key); }, onUpdate: listener => { push = listener; }, onGlass: listener => { glass = listener; }, onSurface() {} } },
-    setInterval: (fn, ms) => intervals.push({ fn, ms }),
+    performance, setInterval: (fn, ms) => intervals.push({ fn, ms }),
     setTimeout: fn => { fn(); return 1; },
     requestAnimationFrame: fn => { animationFrame = fn; return 1; },
     cancelAnimationFrame: () => { animationFrame = null; },
@@ -378,7 +470,9 @@ test('renderer refresh, minute tick, failure and opt-in use the minimal surface'
   assert.deepEqual(bars.map(bar => bar.style.height), ['80%', '100%']);
   toggleListeners.pointerdown({ button: 0, pointerId: 1, screenX: 150, screenY: 250 });
   toggleListeners.pointermove({ pointerId: 1, screenX: 170, screenY: 280 });
+  assert.equal(classes.has('dragging'), true, 'arrastrar levanta el widget');
   toggleListeners.pointerup({ pointerId: 1 });
+  assert.equal(classes.has('dragging'), false);
   toggleListeners.click({ detail: 1 });
   assert.deepEqual(moves, [[120, 230]]);
   assert.equal(classes.has('expanded'), true, 'dragging must not collapse the panel');
@@ -461,6 +555,6 @@ test('la superficie elimina la X y ofrece un selector de proveedores', async () 
   assert.doesNotMatch(html, /listbox|aria-multiselectable/);
   assert.match(css, /transition: box-shadow/);
   // Un filtro en el fundido obliga a la GPU a prepararlo en la primera apertura y pierde un frame.
-  assert.match(css, /@keyframes content-in/);
-  assert.doesNotMatch(css, /@keyframes content-(?:in|out)\s*\{[^@]*filter/);
+  assert.match(css, /@keyframes window-in/);
+  assert.doesNotMatch(css, /@keyframes [\w-]+\s*\{[^@]*filter/);
 });

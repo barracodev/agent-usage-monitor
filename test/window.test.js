@@ -186,13 +186,13 @@ test('cada frame actualiza el cristal una sola vez, sin eventos redundantes y co
   assert.deepEqual(h.window().getBounds(), host);
 });
 
-test('abrir y cerrar usan la duración de alternar; ensanchar para ajustes, la de redimensionar', async () => {
+test('abrir rebota con su duración; cerrar y ensanchar para ajustes usan las suyas sin rebote', async () => {
   const h = await startupHarness();
   await h.start(); h.layout(['claude']);
-  const layout = (expanded, selectorOpen) => h.invoke('monitor:layout', { expanded, selectorOpen, reduceMotion: false, providers: ['claude'] }).motion.duration;
-  assert.equal(layout(true, false), MOTION_MS.toggle);
-  assert.equal(layout(true, true), MOTION_MS.resize);
-  assert.equal(layout(false, false), MOTION_MS.toggle);
+  const layout = (expanded, selectorOpen) => h.invoke('monitor:layout', { expanded, selectorOpen, reduceMotion: false, providers: ['claude'] }).motion;
+  assert.deepEqual([layout(true, false)].map(motion => [motion.duration, motion.spring]), [[MOTION_MS.open, true]]);
+  assert.deepEqual([layout(true, true)].map(motion => [motion.duration, motion.spring]), [[MOTION_MS.resize, false]]);
+  assert.deepEqual([layout(false, false)].map(motion => [motion.duration, motion.spring]), [[MOTION_MS.close, false]]);
 });
 
 test('reducir movimiento termina inmediatamente y los mensajes viejos no lo reviven', async () => {
