@@ -82,6 +82,43 @@ test('el switch cambia todos los proveedores y la cápsula conserva sesión al c
   assert.equal(restarted.elements['#session'].attributes['aria-pressed'], 'true');
 });
 
+test('la cápsula muestra el semanal agotado vigente de cada proveedor', async () => {
+  const h = await settingsHarness();
+  const providers = h.elements['#providers'];
+  const arcs = [{ style: {} }, { style: {} }];
+  providers.children = ['claude', 'codex'].map((provider, index) => ({
+    dataset: { provider }, querySelector: selector => selector === '.fill' ? arcs[index] : { style: {} },
+  }));
+  const figures = () => [...providers.innerHTML.matchAll(/<div class="figure ">(\d+)<span>%/g)].map(match => match[1]);
+  h.call(`latest.limits = {
+    claude: { session: { value: { usedPercent: 3 } }, weekly: { value: { usedPercent: 100, resetsAt: Date.now() + 51 * 3600000 } } },
+    codex: { session: { value: { usedPercent: 27 } }, weekly: { value: { usedPercent: 99 } } }
+  }; render()`);
+  assert.deepEqual(figures(), ['3', '27']);
+  h.elements['#weekly'].listeners.click({ stopPropagation() {} });
+  assert.deepEqual(figures(), ['100', '99']);
+  assert.match(providers.innerHTML, /title="Claude: Sin cuota · /);
+
+  await h.call('setExpanded(false)');
+  assert.deepEqual(figures(), ['100', '27']);
+  assert.deepEqual(arcs.map(arc => arc.style.strokeDasharray), ['100 100', '27 100']);
+  assert.match(providers.innerHTML, /title="Claude: Sin cuota semanal · .* · Reset (dom|lun|mar|mié|jue|vie|sáb) /);
+  assert.match(providers.innerHTML, /title="Codex · /);
+
+  h.call(`latest.limits.claude.weekly.stale = true;
+    latest.limits.codex.weekly = { value: { usedPercent: 101 }, aged: true, fetchedAt: Date.now() - 42 * 60000 };
+    render()`);
+  assert.deepEqual(figures(), ['3', '100']);
+  assert.deepEqual(arcs.map(arc => arc.style.strokeDasharray), ['3 100', '100 100']);
+  assert.match(providers.innerHTML, /title="Codex: Sin cuota semanal · hace \d+ min/);
+  assert.match(providers.innerHTML, /title="Claude · /);
+
+  h.call('delete latest.limits.codex.weekly; render()');
+  assert.deepEqual(figures(), ['3', '27']);
+  assert.deepEqual(arcs.map(arc => arc.style.strokeDasharray), ['3 100', '27 100']);
+  assert.doesNotMatch(providers.innerHTML, /Sin cuota semanal/);
+});
+
 test('reabrir durante el cierre conserva la ventana semanal elegida', async () => {
   const h = await settingsHarness();
   h.call("selectedWindow = 'weekly'; latest.limits = { claude: { weekly: { value: { usedPercent: 32 } } } }; render()");

@@ -77,10 +77,10 @@ function hitTest(event) {
 // Un dato envejecido se sigue mostrando: es el mínimo de su ventana.
 const shown = state => state.key === 'live' || state.key === 'aged';
 
-function cell(name, key, entry, period) {
+function cell(name, key, entry, period, weeklyExhausted = false) {
   const state = providerState(entry);
   const live = shown(state);
-  const value = live ? entry.value.usedPercent : null;
+  const value = weeklyExhausted ? 100 : live ? entry.value.usedPercent : null;
   const tone = meterTone(value);
   const exhausted = tone === 'danger';
   const activeReset = live ? activeResetAt(entry, Date.now(), key === 'claude' && period === 'weekly') : null;
@@ -90,7 +90,8 @@ function cell(name, key, entry, period) {
   const figure = !live ? (state.key === 'stale' ? 'Stale' : '—') : `${Math.floor(value)}<span>%</span>`;
   const countdown = state.key === 'aged' ? formatAge(entry.fetchedAt) : activeReset ? remaining : available ? 'Sin ventana activa' : live ? 'Esperando actualización' : state.key === 'stale' ? 'Dato desactualizado' : 'Sin datos';
   const cached = Number.isFinite(entry?.value?.usedPercent);
-  return `<article class="provider ${state.key} ${tone}${glassContrast?.[key] ? ' light-text' : ''}" data-provider="${key}" title="${name}${exhausted && activeReset ? ': Sin cuota' : ''} · ${countdown} · Reset ${reset}">
+  const quota = weeklyExhausted ? ': Sin cuota semanal' : exhausted && activeReset ? ': Sin cuota' : '';
+  return `<article class="provider ${state.key} ${tone}${glassContrast?.[key] ? ' light-text' : ''}" data-provider="${key}" title="${name}${quota} · ${countdown} · Reset ${reset}">
     <strong class="name">${name}</strong>
     <div class="gauge" aria-hidden="true">
       <svg viewBox="0 0 80 80">
@@ -144,22 +145,31 @@ function renderSettings() {
 function render() {
   const activeProviders = visibleProviders();
   const detail = expanded || widget.classList.contains('expanded');
-  const period = detail ? selectedWindow : 'session';
-  const entryFor = key => latest.limits[key]?.[period];
+  const cells = new Map(activeProviders.map(({ key }) => {
+    const windows = latest.limits[key];
+    const weekly = windows?.weekly;
+    const weeklyExhausted = !detail && shown(providerState(weekly)) && weekly.value.usedPercent >= 100;
+    const period = detail ? selectedWindow : weeklyExhausted ? 'weekly' : 'session';
+    return [key, { entry: windows?.[period], period, weeklyExhausted }];
+  }));
   windowSwitch.hidden = !detail;
   for (const button of windowButtons) button.setAttribute('aria-pressed', String(button.dataset.window === selectedWindow));
   widget.dataset.count = String(activeProviders.length);
   providers.dataset.count = String(activeProviders.length);
   providers.hidden = activeProviders.length === 0;
   emptyState.hidden = activeProviders.length !== 0;
-  providers.innerHTML = activeProviders.map(provider => cell(provider.name, provider.key, entryFor(provider.key), period)).join('');
+  providers.innerHTML = activeProviders.map(({ name, key }) => {
+    const { entry, period, weeklyExhausted } = cells.get(key);
+    return cell(name, key, entry, period, weeklyExhausted);
+  }).join('');
   for (const element of providers.children) {
-    const entry = entryFor(element.dataset.provider);
+    const { entry, weeklyExhausted } = cells.get(element.dataset.provider) || {};
+    const percent = weeklyExhausted ? 100 : shown(providerState(entry)) ? entry.value.usedPercent : 0;
     // CSSOM actualiza el arco sin abrir la CSP a estilos inline.
-    element.querySelector('.fill').style.strokeDasharray = `${shown(providerState(entry)) ? entry.value.usedPercent : 0} 100`;
+    element.querySelector('.fill').style.strokeDasharray = `${percent} 100`;
     element.querySelector('.bar-fill').style.height = `${Number.isFinite(entry?.value?.usedPercent) ? entry.value.usedPercent : 0}%`;
   }
-  const entries = activeProviders.map(provider => entryFor(provider.key));
+  const entries = activeProviders.map(({ key }) => cells.get(key).entry);
   const old = entries.find(entry => ['aged', 'stale'].includes(providerState(entry).key));
   const stamps = entries.map(entry => entry?.fetchedAt).filter(Number.isFinite);
   const oldProvider = old && activeProviders[entries.indexOf(old)];
